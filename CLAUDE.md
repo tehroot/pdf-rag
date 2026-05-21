@@ -67,8 +67,8 @@ transports pick it up via CDI.
 ## Architecture
 
 ```
-core/src/main/java/org/example/
-├── tools/IngestTools.java              # MCP @Tool surface (5 tools)
+core/src/main/java/org/hayden/
+├── tools/IngestTools.java              # MCP @Tool surface (7 tools)
 ├── ingest/
 │   ├── IngestService.java              # dispatcher: picks Backend by arg / default
 │   ├── IngestRequest / SearchRequest   # tool input records

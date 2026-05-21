@@ -1,6 +1,6 @@
 # Async ingest queue (`IngestJob` / `IngestQueue` / `IngestWorker`)
 
-`core/src/main/java/org/example/jobs/` — three classes that let large PDF
+`core/src/main/java/org/hayden/jobs/` — three classes that let large PDF
 ingests run in the background so the MCP tool call doesn't block the agent
 for minutes.
 

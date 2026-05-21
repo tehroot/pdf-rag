@@ -1,13 +1,14 @@
 # Integrating pdf-rag-ingest with a local LLM (MCP)
 
-> **Note:** This doc predates the fusion design. The tool surface now includes
-> a fifth tool (`inspect_page`) and new args on `ingest_document`
-> (`enable_visual_index`) and `search_documents` (`retrieval_mode`,
-> `fusion_strategy`). See [components/mcp-tools.md](components/mcp-tools.md)
-> for the current tool surface, and [architecture.md](architecture.md) for the
-> backend architecture. The wiring examples below for Claude Desktop / Cline /
-> mcp-cli still work; you'll just want to add `COLPALI_SIDECAR_URL` to the env
-> if running the visual side.
+> **Note:** This doc predates the fusion design. The tool surface has expanded
+> to seven tools — `inspect_page`, `get_ingest_status`, and `drop_visual_index`
+> are new, alongside new args on `ingest_document` (`enable_visual_index`) and
+> `search_documents` (`retrieval_mode`, `fusion_strategy`). See
+> [components/mcp-tools.md](components/mcp-tools.md) for the current tool
+> surface, and [architecture.md](architecture.md) for the backend architecture.
+> The wiring examples below for Claude Desktop / Cline / mcp-cli still work;
+> you'll just want to add `COLPALI_SIDECAR_URL` to the env if running the
+> visual side.
 
 This server exposes its tools over the Model Context Protocol. To use it with a
 local LLM stack you need:
@@ -23,7 +24,7 @@ local LLM stack you need:
    `EMBED_BASE_URL`, `EMBED_MODEL`, `COLPALI_SIDECAR_URL`,
    `INGEST_DEFAULT_VISUAL_INDEX`, etc.) and command/URL.
 
-The two transports are functionally identical — same five tools, same backends,
+The two transports are functionally identical — same seven tools, same backends,
 same env. Pick the one your host supports:
 
 | Transport | When to pick it |

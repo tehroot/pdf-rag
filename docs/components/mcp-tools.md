@@ -1,7 +1,7 @@
 # MCP tool surface (`IngestTools`)
 
 `core/.../tools/IngestTools.java` — the only class the MCP framework
-introspects to build the tool catalogue. Five `@Tool` methods, all
+introspects to build the tool catalogue. Seven `@Tool` methods, all
 `@Blocking`.
 
 ## Tools
@@ -337,7 +337,7 @@ JSON-RPC error responses; agents see structured failures rather than hangs.
 ## Why it's like this
 
 - **Annotations over registration.** Every tool spec the MCP server publishes
-  is derived from `@Tool` + `@ToolArg`. Adding a sixth tool is a sixth
+  is derived from `@Tool` + `@ToolArg`. Adding another tool is another
   annotated method — no registration table, no schema duplication.
 - **`@Blocking` is mandatory.** Quarkus MCP runs requests on event-loop
   threads by default. Our backends do synchronous HTTP and (potentially)

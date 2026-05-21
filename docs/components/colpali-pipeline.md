@@ -1,6 +1,6 @@
 # ColPaliPipeline
 
-`core/src/main/java/org/example/backend/qdrant/ColPaliPipeline.java` (~270
+`core/src/main/java/org/hayden/backend/qdrant/ColPaliPipeline.java` (~270
 lines). The visual side of the Qdrant backend — owns the `<kb>_pages`
 collection and the page-image storage. Used by `QdrantBackend` as a
 collaborator (NOT a `Backend` of its own).

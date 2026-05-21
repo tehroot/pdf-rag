@@ -1,6 +1,6 @@
 # FileFetcher
 
-`core/src/main/java/org/example/ingest/FileFetcher.java` (~165 lines). The
+`core/src/main/java/org/hayden/ingest/FileFetcher.java` (~165 lines). The
 input stage of both backends — turns whatever the agent gave us (a URL, a
 path, base64 bytes) into a uniform `FetchedFile{filename, contentType, content}`
 record.

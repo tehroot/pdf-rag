@@ -1,6 +1,6 @@
 # OpenWebUiBackend + helpers
 
-`core/src/main/java/org/example/backend/openwebui/`. The parallel backend.
+`core/src/main/java/org/hayden/backend/openwebui/`. The parallel backend.
 Where Qdrant means "we own the RAG", Open WebUI means "we hand a raw file
 to Open WebUI and let it do extraction + chunking + embedding + storage".
 

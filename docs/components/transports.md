@@ -38,7 +38,7 @@ server-stdio/
 ```xml
 <dependencies>
   <dependency>
-    <groupId>org.example</groupId>
+    <groupId>org.hayden</groupId>
     <artifactId>pdf-rag-ingest-core</artifactId>
   </dependency>
   <dependency>
@@ -58,7 +58,7 @@ quarkus.application.name=pdf-rag-ingest-stdio
 
 # Make Quarkus index the core JAR so its @Tool / @ApplicationScoped beans
 # are discovered. Without this, tools/list returns []. See "Jandex" below.
-quarkus.index-dependency.core.group-id=org.example
+quarkus.index-dependency.core.group-id=org.hayden
 quarkus.index-dependency.core.artifact-id=pdf-rag-ingest-core
 
 # stdio transport: do not emit Quarkus banner / colored logs to stdout —
@@ -128,7 +128,7 @@ server-http/
 ```xml
 <dependencies>
   <dependency>
-    <groupId>org.example</groupId>
+    <groupId>org.hayden</groupId>
     <artifactId>pdf-rag-ingest-core</artifactId>
   </dependency>
   <dependency>
@@ -143,7 +143,7 @@ server-http/
 ```properties
 quarkus.application.name=pdf-rag-ingest-http
 
-quarkus.index-dependency.core.group-id=org.example
+quarkus.index-dependency.core.group-id=org.hayden
 quarkus.index-dependency.core.artifact-id=pdf-rag-ingest-core
 
 quarkus.http.host=0.0.0.0

@@ -257,8 +257,9 @@ mcp_call ingest_document "$(jq -nc --arg b "$PDF_B64" '{
   kb_name:"smoke-visual",
   enable_visual_index:true
 }')"
-# Expected (3-page PDF is below the default INGEST_ASYNC_THRESHOLD_PAGES=5
-# threshold → SYNC path. The call blocks ~5-15s on CPU ColPali, then returns:
+# Expected (3-page PDF is below INGEST_ASYNC_THRESHOLD_PAGES=5 — the value set
+# in .env.example for CPU deployments; the code default is 20). → SYNC path.
+# The call blocks ~5-15s on CPU ColPali, then returns:
 # {
 #   "backend":"qdrant",
 #   "kb_name":"smoke-visual",
@@ -369,7 +370,8 @@ open /tmp/inspected-page.png   # macOS; on Linux: xdg-open
 
 ### 2h. Async ingest (queued path)
 
-Build a bigger PDF (≥ `INGEST_ASYNC_THRESHOLD_PAGES`, default 5):
+Build a bigger PDF (≥ `INGEST_ASYNC_THRESHOLD_PAGES` — `.env.example` sets 5
+for CPU deployments; the code default is 20):
 
 ```bash
 python3 - <<'PY' > /tmp/smoke-big.pdf

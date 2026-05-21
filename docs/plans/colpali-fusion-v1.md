@@ -107,7 +107,7 @@ public class QdrantBackend implements Backend {
 
 ## Components
 
-### New Java classes (in `core/src/main/java/org/example/`)
+### New Java classes (in `core/src/main/java/org/hayden/`)
 
 | File | Purpose |
 |------|---------|

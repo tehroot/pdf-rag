@@ -27,7 +27,7 @@ Backends are picked per tool call via the `backend` arg, or fall back to
 pdf-rag-ingest/
 ├── pom.xml                 parent (multi-module, dependencyManagement only)
 ├── core/                   ALL Java logic + ALL Java tests. No transport.
-│   └── src/main/java/org/example/
+│   └── src/main/java/org/hayden/
 │       ├── tools/IngestTools.java        MCP surface (5 @Tool methods)
 │       ├── ingest/
 │       │   ├── IngestService.java        dispatcher: name → Backend

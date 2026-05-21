@@ -152,8 +152,9 @@ public List<KnowledgeBaseSummary> listKnowledgeBases() {
 
 `ChunkPipeline.listKbCollections` iterates Qdrant's `/collections`, skipping
 any name ending in `_pages` (those are the visual sub-collections of named
-KBs, not standalone KBs). v1 doesn't surface `visual_index_enabled` on the
-listing — that's task #53.
+KBs, not standalone KBs). `QdrantBackend.listKnowledgeBases` then augments
+each row with `visualIndexEnabled` / `visualIndexPages` via
+`ColPaliPipeline.isEnabledFor` + `getPageCount`.
 
 ## Failure modes
 

@@ -1,6 +1,6 @@
 # Embedder
 
-`core/src/main/java/org/example/backend/qdrant/Embedder.java` (~160 lines).
+`core/src/main/java/org/hayden/backend/qdrant/Embedder.java` (~160 lines).
 The OpenAI-compatible embeddings client. Project default target: llama.cpp's
 `llama-server` started with `--embeddings`. Same code works against vLLM,
 vanilla OpenAI, Together, LM Studio, or any other endpoint that speaks the

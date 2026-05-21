@@ -1,6 +1,6 @@
 # Chunker
 
-`core/src/main/java/org/example/backend/qdrant/Chunker.java` (~180 lines). The
+`core/src/main/java/org/hayden/backend/qdrant/Chunker.java` (~180 lines). The
 second step of the Qdrant pipeline — splits long extracted text into bounded,
 overlapping chunks suitable for embedding. **Each chunk carries the page
 range it came from**, which is what makes the chunk-to-page join in fusion

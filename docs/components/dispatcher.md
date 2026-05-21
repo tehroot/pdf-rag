@@ -1,7 +1,7 @@
 # Dispatcher + Backend interface
 
-`core/src/main/java/org/example/ingest/IngestService.java` (the dispatcher) and
-`core/src/main/java/org/example/backend/Backend.java` (the interface).
+`core/src/main/java/org/hayden/ingest/IngestService.java` (the dispatcher) and
+`core/src/main/java/org/hayden/backend/Backend.java` (the interface).
 Two backends today: `QdrantBackend`, `OpenWebUiBackend`. Adding a third means
 implementing `Backend` and dropping it on the classpath — nothing else changes.
 
@@ -126,7 +126,7 @@ If `backendName` is a specific name, scope to just that backend's list.
 - **`Backend` as an interface, not an abstract class.** Implementations share
   almost no code (the Qdrant path is fundamentally different from the Open
   WebUI path), so a base class would force artificial commonality. The shared
-  bits — `FileFetcher`, request/response records — live in `org.example.ingest`
+  bits — `FileFetcher`, request/response records — live in `org.hayden.ingest`
   and each backend injects what it needs.
 - **CDI discovery instead of an enum or factory.** Adding a Redis backend
   means: implement `Backend`, mark `@ApplicationScoped`, return `name() =

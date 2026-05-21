@@ -1,5 +1,7 @@
 # pdf-rag-ingest documentation
 
+98% slopcoded, ignore issues, I'll make it 90% slopcoded soon. 
+
 An MCP server that lets an LLM agent ingest documents into a vector store and
 search them. Two backends, picked per-call or by environment default:
 

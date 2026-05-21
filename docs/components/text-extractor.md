@@ -1,6 +1,6 @@
 # TextExtractor (Tika + PDFBox per-page)
 
-`core/src/main/java/org/example/backend/qdrant/TextExtractor.java` (~120 lines).
+`core/src/main/java/org/hayden/backend/qdrant/TextExtractor.java` (~120 lines).
 The first step of the Qdrant pipeline after `FileFetcher` — turns binary
 document bytes into plain text the chunker can split.
 

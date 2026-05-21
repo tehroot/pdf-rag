@@ -67,7 +67,7 @@ agent ──MCP──► IngestTools.search_documents (retrieval_mode arg)
 
 | Layer | Doc | Class(es) |
 |-------|-----|-----------|
-| Agent-facing | [mcp-tools.md](mcp-tools.md) | `IngestTools` (4 tools + `inspect_page` + `get_file_status`) |
+| Agent-facing | [mcp-tools.md](mcp-tools.md) | `IngestTools` (7 tools: `ingest_document`, `search_documents`, `list_knowledge_bases`, `get_file_status`, `get_ingest_status`, `inspect_page`, `drop_visual_index`) |
 | Routing | [dispatcher.md](dispatcher.md) | `IngestService`, `Backend` interface |
 | Shared input | [file-fetcher.md](file-fetcher.md) | `FileFetcher` |
 | Orchestration | [qdrant-backend.md](qdrant-backend.md) | `QdrantBackend` |

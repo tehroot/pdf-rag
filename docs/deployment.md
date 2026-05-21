@@ -291,7 +291,7 @@ WantedBy=multi-user.target
   upgrade, something has gone wrong.
 - **Open WebUI**: most upgrades are transparent. The pieces most likely to drift
   are the response shapes captured in
-  `core/src/main/java/org/example/backend/openwebui/dto/`.
+  `core/src/main/java/org/hayden/backend/openwebui/dto/`.
 
 ## Failure modes seen in the wild
 
