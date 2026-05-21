@@ -1,0 +1,36 @@
+# GPU-accelerated ColPali sidecar image (CUDA 12.x).
+#
+# Base: pytorch/pytorch ships with CUDA-enabled torch + python pre-installed,
+# keeping our layer thin. NVIDIA NGC images (nvcr.io/nvidia/pytorch) are
+# bigger and would also work, but require an NGC login for some tags.
+FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime AS base
+
+# A few small system bits not in the pytorch base image.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+        && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Torch is already installed in the base. Install our app + the rest of [ml].
+COPY pyproject.toml ./
+COPY src/ ./src/
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -e ".[ml]"
+
+ENV PYTHONUNBUFFERED=1 \
+    COLPALI_HOST=0.0.0.0 \
+    COLPALI_PORT=8090 \
+    COLPALI_DEVICE=cuda \
+    COLPALI_DTYPE=bfloat16 \
+    COLPALI_MODEL=vidore/colqwen2-v1.0
+
+EXPOSE 8090
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD python -c "import urllib.request,sys,json; \
+        d=json.loads(urllib.request.urlopen('http://localhost:8090/healthz',timeout=4).read()); \
+        sys.exit(0 if d.get('ready') else 1)"
+
+CMD ["colpali-server"]

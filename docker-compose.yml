@@ -1,0 +1,151 @@
+# End-to-end stack for pdf-rag-ingest.
+#
+# Services:
+#   qdrant         — vector store (pinned to v1.13.x)
+#   llama-server   — text embeddings (bge-* models) via llama.cpp
+#   colpali-server — page embeddings (ColPali / ColQwen2 / ColSmolVLM)
+#   pdf-rag-http   — the Java MCP server (HTTP transport)
+#
+# Bring up with:
+#   docker compose up -d qdrant llama-server colpali-server      # backend only
+#   docker compose up -d                                         # whole stack
+#
+# Configuration: copy .env.example to .env and edit. All knobs in this file
+# come from env vars; the bare `docker compose up` works once .env is in place.
+#
+# The colpali-server image defaults to the CPU build; for GPU acceleration,
+# set COLPALI_DOCKERFILE=Dockerfile.cuda in the environment and uncomment the
+# `deploy.resources.reservations.devices` block.
+
+services:
+  qdrant:
+    # Pinned to a known-good 1.13.x release. Bump deliberately after re-testing
+    # the prefetch + rerank query API and binary quantization paths.
+    image: qdrant/qdrant:v1.13.4
+    container_name: pdf-rag-qdrant
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"     # REST
+      - "${QDRANT_GRPC_PORT:-6334}:6334"   # gRPC (unused by us; exposed for tooling)
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:6333/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  llama-server:
+    # llama.cpp server. Mount a host directory of GGUF models and set
+    # LLAMA_MODEL_FILE to the model file name (e.g., bge-small-en-v1.5-f16.gguf).
+    # The /models mount is the host's ./models directory.
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: pdf-rag-llama
+    command: >
+      -m /models/${LLAMA_MODEL_FILE:-bge-small-en-v1.5-f16.gguf}
+      --embeddings
+      --host 0.0.0.0
+      --port 8081
+      --ctx-size ${LLAMA_CTX_SIZE:-8192}
+    volumes:
+      - ./models:/models:ro
+    ports:
+      - "${LLAMA_PORT:-8081}:8081"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    # Uncomment for GPU acceleration (requires nvidia-container-toolkit on host):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - capabilities: [gpu]
+
+  colpali-server:
+    build:
+      context: ./sidecar
+      dockerfile: ${COLPALI_DOCKERFILE:-Dockerfile.cpu}
+    container_name: pdf-rag-colpali
+    ports:
+      - "${COLPALI_PORT:-8090}:8090"
+    environment:
+      COLPALI_MODEL: ${COLPALI_MODEL:-vidore/colsmolvlm-v0.1}
+      COLPALI_DEVICE: ${COLPALI_DEVICE:-cpu}
+      COLPALI_DTYPE: ${COLPALI_DTYPE:-float32}
+      COLPALI_MAX_BATCH_SIZE: ${COLPALI_MAX_BATCH_SIZE:-4}
+    volumes:
+      # Cache HF model downloads on the host so container restarts don't
+      # re-fetch multi-GB checkpoints.
+      - hf-cache:/root/.cache/huggingface
+    restart: unless-stopped
+    # Uncomment for GPU acceleration:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - capabilities: [gpu]
+
+  pdf-rag-http:
+    build:
+      context: .
+      dockerfile: server-http/Dockerfile
+    container_name: pdf-rag-http
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      llama-server:
+        condition: service_healthy
+      colpali-server:
+        condition: service_started
+    ports:
+      - "${PDF_RAG_PORT:-8080}:8080"
+    environment:
+      # Backend selection
+      INGEST_BACKEND: ${INGEST_BACKEND:-qdrant}
+      RETRIEVAL_MODE: ${RETRIEVAL_MODE:-auto}
+      INGEST_DEFAULT_VISUAL_INDEX: "${INGEST_DEFAULT_VISUAL_INDEX:-true}"
+
+      # Qdrant
+      QDRANT_URL: http://qdrant:6333
+
+      # Text embeddings (llama-server inside the compose network)
+      EMBED_BASE_URL: http://llama-server:8081/v1
+      EMBED_MODEL: ${EMBED_MODEL:-bge-small-en-v1.5}
+      EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE:-64}
+
+      # ColPali sidecar
+      COLPALI_SIDECAR_URL: http://colpali-server:8090
+      COLPALI_BATCH_SIZE: ${COLPALI_BATCH_SIZE:-4}
+
+      # Async ingest queue — aggressively queue on CPU sidecars
+      INGEST_ASYNC_THRESHOLD_PAGES: ${INGEST_ASYNC_THRESHOLD_PAGES:-5}
+      INGEST_QUEUE_WORKERS: ${INGEST_QUEUE_WORKERS:-1}
+      INGEST_QUEUE_PATH: /var/lib/pdf-rag-ingest/queue
+
+      # Page-image storage (rendered PNGs for inspect_page)
+      INGEST_PAGE_STORE_ROOT: /var/lib/pdf-rag-ingest/page-images
+
+      # Fusion config
+      FUSION_STRATEGY: ${FUSION_STRATEGY:-rrf}
+
+      # Open WebUI is OFF by default — leave OPEN_WEBUI_* unset unless wiring it.
+      # OPEN_WEBUI_BASE_URL: ${OPEN_WEBUI_BASE_URL}
+      # OPEN_WEBUI_API_KEY: ${OPEN_WEBUI_API_KEY}
+
+      # MCP transport
+      MCP_CORS_ORIGINS: ${MCP_CORS_ORIGINS:-*}
+    volumes:
+      - page-images:/var/lib/pdf-rag-ingest/page-images
+      - ingest-queue:/var/lib/pdf-rag-ingest/queue
+    restart: unless-stopped
+
+volumes:
+  qdrant-data:
+  hf-cache:
+  page-images:
+  ingest-queue:

@@ -1,0 +1,66 @@
+[project]
+name = "colpali-server"
+version = "0.1.0"
+description = "ColPali / ColQwen2 / ColSmolVLM HTTP sidecar for pdf-rag-ingest"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+readme = "README.md"
+
+# Core (HTTP only) dependencies — enough to run the bootstrap stub and unit
+# tests of wire shapes. Production deployments add the [ml] extras to get the
+# actual model loading + inference path.
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.32,<1.0",
+    "pydantic>=2.7,<3.0",
+    "pydantic-settings>=2.5,<3.0",
+    "python-multipart>=0.0.9",
+    # Pillow is small, pure-Python-friendly, and needed by the inference
+    # layer for PNG decoding regardless of which model backend runs.
+    "pillow>=10.0,<12.0",
+]
+
+[project.optional-dependencies]
+# Install for real inference. Heavy: torch + transformers + the colpali-engine
+# helper. Pinned loosely; lock in deployment via uv.lock or pip-tools.
+# CPU-only torch is the default; CUDA wheels are installed via the GPU
+# Dockerfile's extra-index-url.
+ml = [
+    "torch>=2.4,<3.0",
+    "transformers>=4.45,<5.0",
+    "accelerate>=0.34,<2.0",
+    "numpy>=1.26,<3.0",
+    # colpali-engine provides ColPaliForRetrieval / ColQwen2ForRetrieval + pooling helpers.
+    "colpali-engine>=0.3.5,<1.0",
+]
+dev = [
+    "pytest>=8.0,<9.0",
+    "httpx>=0.27,<1.0",      # FastAPI's TestClient uses httpx
+    "ruff>=0.6,<1.0",
+]
+
+[project.scripts]
+colpali-server = "colpali_server.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/colpali_server"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/README.md", "/pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]

@@ -1,0 +1,44 @@
+# CPU-only ColPali sidecar image.
+#
+# For modest CPUs we recommend a smaller model: set COLPALI_MODEL=vidore/colsmolvlm-v0.1
+# at run time. ColQwen2 / ColPali on CPU is technically supported but slow
+# (~0.3-1 page/sec) and only practical for small corpora.
+FROM python:3.11-slim AS base
+
+# System deps: build-essential for any pip wheels that build from source,
+# libgl1 + libglib2.0 because pillow / opencv-style image libs sometimes
+# pull them in transitively.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libgl1 \
+        libglib2.0-0 \
+        && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install CPU-only torch from PyTorch's CPU index first — keeps the image
+# from pulling in the multi-GB CUDA wheels we don't need here.
+COPY pyproject.toml ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch>=2.4,<3.0"
+
+# Now install the package + ml extras. Torch is already satisfied; the rest
+# (transformers, accelerate, pillow, numpy, colpali-engine) come from PyPI.
+COPY src/ ./src/
+RUN pip install --no-cache-dir -e ".[ml]"
+
+ENV PYTHONUNBUFFERED=1 \
+    COLPALI_HOST=0.0.0.0 \
+    COLPALI_PORT=8090 \
+    COLPALI_DEVICE=cpu \
+    COLPALI_DTYPE=float32 \
+    COLPALI_MODEL=vidore/colsmolvlm-v0.1
+
+EXPOSE 8090
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD python -c "import urllib.request,sys,json; \
+        d=json.loads(urllib.request.urlopen('http://localhost:8090/healthz',timeout=4).read()); \
+        sys.exit(0 if d.get('ready') else 1)"
+
+CMD ["colpali-server"]
