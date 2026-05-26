@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Torch is already installed in the base. Install our app + the rest of [ml].
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 COPY src/ ./src/
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -e ".[ml]"

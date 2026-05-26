@@ -18,7 +18,7 @@ WORKDIR /app
 
 # Install CPU-only torch from PyTorch's CPU index first — keeps the image
 # from pulling in the multi-GB CUDA wheels we don't need here.
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch>=2.4,<3.0"
 
