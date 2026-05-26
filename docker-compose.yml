@@ -30,7 +30,9 @@ services:
       - qdrant-data:/qdrant/storage
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:6333/readyz"]
+      # The qdrant image is debian-slim without wget; use a TCP probe via the
+      # bash builtin /dev/tcp so we don't depend on a tool that may not exist.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333' || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5

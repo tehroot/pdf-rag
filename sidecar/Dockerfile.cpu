@@ -18,14 +18,24 @@ WORKDIR /app
 
 # Install CPU-only torch from PyTorch's CPU index first — keeps the image
 # from pulling in the multi-GB CUDA wheels we don't need here.
+# Layer ordering: copy *only* pyproject.toml + README.md before the heavy
+# pip installs so that editing src/ doesn't invalidate the ~3 GB ML layer.
 COPY pyproject.toml README.md ./
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch>=2.4,<3.0"
 
-# Now install the package + ml extras. Torch is already satisfied; the rest
-# (transformers, accelerate, pillow, numpy, colpali-engine) come from PyPI.
+# Pre-create a minimal package skeleton so `pip install -e .` succeeds without
+# the real src/ being copied yet. The real src/ is bind-replaced below.
+RUN mkdir -p src/colpali_server && touch src/colpali_server/__init__.py
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip \
+    && pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.4,<3.0"
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -e ".[ml]"
+
+# Now copy the real source. Because the package is already installed in editable
+# mode, this is a near-instant layer — no reinstall.
 COPY src/ ./src/
-RUN pip install --no-cache-dir -e ".[ml]"
 
 ENV PYTHONUNBUFFERED=1 \
     COLPALI_HOST=0.0.0.0 \

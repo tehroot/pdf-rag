@@ -14,10 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Torch is already installed in the base. Install our app + the rest of [ml].
+# Layer ordering: install deps from pyproject.toml *before* copying src/ so that
+# editing src/ doesn't re-trigger the ~1 GB transformers / colpali-engine install.
 COPY pyproject.toml README.md ./
+RUN mkdir -p src/colpali_server && touch src/colpali_server/__init__.py
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip \
+    && pip install -e ".[ml]"
+
 COPY src/ ./src/
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -e ".[ml]"
 
 ENV PYTHONUNBUFFERED=1 \
     COLPALI_HOST=0.0.0.0 \
