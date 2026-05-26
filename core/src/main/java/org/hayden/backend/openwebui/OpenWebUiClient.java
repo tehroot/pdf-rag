@@ -32,7 +32,7 @@ public class OpenWebUiClient {
     @ConfigProperty(name = "ingest.openwebui.base-url")
     String baseUrl;
 
-    @ConfigProperty(name = "ingest.openwebui.api-key")
+    @ConfigProperty(name = "ingest.openwebui.api-key", defaultValue = "")
     String apiKey;
 
     @ConfigProperty(name = "ingest.openwebui.connect-timeout-seconds", defaultValue = "10")

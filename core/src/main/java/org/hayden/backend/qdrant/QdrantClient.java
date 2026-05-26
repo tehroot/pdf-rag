@@ -40,7 +40,7 @@ public class QdrantClient {
     @ConfigProperty(name = "ingest.qdrant.url")
     String baseUrl;
 
-    @ConfigProperty(name = "ingest.qdrant.api-key")
+    @ConfigProperty(name = "ingest.qdrant.api-key", defaultValue = "")
     String apiKey;
 
     @ConfigProperty(name = "ingest.qdrant.distance", defaultValue = "Cosine")

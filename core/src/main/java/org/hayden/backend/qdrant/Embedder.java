@@ -37,7 +37,7 @@ public class Embedder {
     @ConfigProperty(name = "ingest.embed.base-url")
     String baseUrl;
 
-    @ConfigProperty(name = "ingest.embed.api-key")
+    @ConfigProperty(name = "ingest.embed.api-key", defaultValue = "")
     String apiKey;
 
     @ConfigProperty(name = "ingest.embed.model")
