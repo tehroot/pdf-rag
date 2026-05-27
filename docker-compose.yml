@@ -152,6 +152,11 @@ services:
     volumes:
       - page-images:/var/lib/pdf-rag-ingest/page-images
       - ingest-queue:/var/lib/pdf-rag-ingest/queue
+      # Host inbox for documents the agent can ingest via source_type=path.
+      # Useful when a target URL is fronted by a CDN (akamai/cloudflare) that
+      # rejects server-side fetches — scp/cp the file in, then say "ingest
+      # /docs/<filename>.pdf" in the chat.
+      - ${INGEST_INBOX:-./incoming}:/docs:ro
     restart: unless-stopped
 
 volumes:
