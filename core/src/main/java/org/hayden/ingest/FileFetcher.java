@@ -40,6 +40,14 @@ public class FileFetcher {
     @ConfigProperty(name = "ingest.fetch.request-timeout-seconds", defaultValue = "120")
     long requestTimeoutSeconds;
 
+    // Many CDNs (akamai, cloudflare bot manager) silently RST the connection
+    // when they see Java/curl-style User-Agents. Override with a realistic
+    // browser UA by default; configurable in case a specific origin needs
+    // something else.
+    @ConfigProperty(name = "ingest.fetch.user-agent",
+            defaultValue = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    String userAgent;
+
     private HttpClient http;
 
     @PostConstruct
@@ -66,6 +74,9 @@ public class FileFetcher {
         }
         HttpRequest req = HttpRequest.newBuilder(uri)
                 .timeout(Duration.ofSeconds(requestTimeoutSeconds))
+                .header("User-Agent", userAgent)
+                .header("Accept", "*/*")
+                .header("Accept-Language", "en-US,en;q=0.9")
                 .GET()
                 .build();
         HttpResponse<byte[]> resp;

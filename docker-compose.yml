@@ -136,13 +136,13 @@ services:
       # Fusion config
       FUSION_STRATEGY: ${FUSION_STRATEGY:-rrf}
 
-      # Auth — pass through to the container as (possibly empty) strings. The
-      # ${VAR:-} compose form substitutes empty if the host env var is unset,
-      # which Quarkus's SmallRye Config accepts; leaving these out entirely
-      # makes the @ConfigProperty injection fail at boot.
-      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
-      EMBED_API_KEY: ${EMBED_API_KEY:-}
-      OPEN_WEBUI_API_KEY: ${OPEN_WEBUI_API_KEY:-}
+      # Auth — SmallRye Config 3.x rejects EMPTY env-var values for non-Optional
+      # String injection points, so default to a single space rather than "".
+      # The runtime auth-header logic uses apiKey.isBlank(), which treats any
+      # whitespace as "no auth" — so " " behaves identically to no key.
+      QDRANT_API_KEY: ${QDRANT_API_KEY:- }
+      EMBED_API_KEY: ${EMBED_API_KEY:- }
+      OPEN_WEBUI_API_KEY: ${OPEN_WEBUI_API_KEY:- }
 
       # Open WebUI base URL — only honored when INGEST_BACKEND includes openwebui.
       OPEN_WEBUI_BASE_URL: ${OPEN_WEBUI_BASE_URL:-http://localhost:3000}
