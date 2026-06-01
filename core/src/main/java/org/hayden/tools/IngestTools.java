@@ -106,11 +106,12 @@ public class IngestTools {
     @Tool(name = "list_knowledge_bases",
             description = """
                     List knowledge bases / collections.
-                    Defaults to listing across all enabled backends; pass backend='qdrant' or
-                    'openwebui' to scope, or backend='all' explicitly.""")
+                    Defaults to the server-configured backend (INGEST_BACKEND). Pass
+                    backend='qdrant' or 'openwebui' to scope explicitly, or backend='all'
+                    to merge across every enabled backend.""")
     @Blocking
     public List<KnowledgeBaseSummary> listKnowledgeBases(
-            @ToolArg(description = "Backend to query: 'qdrant', 'openwebui', or 'all'.", required = false, defaultValue = "all") String backend) {
+            @ToolArg(description = "Backend to query: 'qdrant', 'openwebui', or 'all'. Defaults to the server-configured backend.", required = false) String backend) {
         return ingestService.listKnowledgeBases(backend);
     }
 

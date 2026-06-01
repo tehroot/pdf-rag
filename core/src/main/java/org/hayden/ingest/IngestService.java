@@ -6,6 +6,7 @@ import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hayden.backend.Backend;
 import org.hayden.backend.KnowledgeBaseSummary;
+import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -17,6 +18,8 @@ import java.util.List;
  */
 @ApplicationScoped
 public class IngestService {
+
+    private static final Logger LOG = Logger.getLogger(IngestService.class);
 
     @Inject
     Instance<Backend> backends;
@@ -33,13 +36,23 @@ public class IngestService {
     }
 
     public List<KnowledgeBaseSummary> listKnowledgeBases(String backendName) {
-        if (backendName == null || backendName.isBlank() || "all".equalsIgnoreCase(backendName)) {
+        // Explicit "all" → best-effort merge across every backend, swallowing
+        // per-backend errors (e.g. an unconfigured Open WebUI loopback) so the
+        // caller still gets the backends that work.
+        if ("all".equalsIgnoreCase(backendName)) {
             List<KnowledgeBaseSummary> merged = new ArrayList<>();
             for (Backend b : backends) {
-                merged.addAll(b.listKnowledgeBases());
+                try {
+                    merged.addAll(b.listKnowledgeBases());
+                } catch (Exception e) {
+                    LOG.warnf("Skipping backend '%s' in list_knowledge_bases (all): %s",
+                            b.name(), e.getMessage());
+                }
             }
             return merged;
         }
+        // Anything else (including null/blank) → use the configured default
+        // backend. pick() handles the fallback to ingest.backend.default.
         return pick(backendName).listKnowledgeBases();
     }
 

@@ -86,11 +86,32 @@ class IngestServiceTest {
     }
 
     @Test
-    void listKnowledgeBases_mergesAcrossBackends_whenNoneSpecified() {
+    void listKnowledgeBases_defaultsToConfiguredBackend_whenNoneSpecified() {
+        // Default backend in this test fixture is qdrant (set in setUp). With
+        // no explicit "all", we should get only the qdrant KBs — not the
+        // openwebui ones, so an unconfigured openwebui can't take down the
+        // whole listing.
         qdrant.kbs.add(new KnowledgeBaseSummary("qdrant", "docs", "docs", 0L, 384));
         openwebui.kbs.add(new KnowledgeBaseSummary("openwebui", "kb-2", "Notes", null, null));
 
-        assertThat(service.listKnowledgeBases(null)).hasSize(2);
+        assertThat(service.listKnowledgeBases(null))
+                .singleElement()
+                .extracting(KnowledgeBaseSummary::backend)
+                .isEqualTo("qdrant");
+    }
+
+    @Test
+    void listKnowledgeBases_acrossAll_swallowsPerBackendFailures() {
+        // With "all", a failing backend (e.g. unreachable Open WebUI loopback)
+        // is logged and skipped — the caller still gets the working backends.
+        qdrant.kbs.add(new KnowledgeBaseSummary("qdrant", "docs", "docs", 1L, 384));
+        openwebui.failOnList = true;
+
+        List<KnowledgeBaseSummary> all = service.listKnowledgeBases("all");
+
+        assertThat(all).singleElement()
+                .extracting(KnowledgeBaseSummary::backend)
+                .isEqualTo("qdrant");
     }
 
     @Test
@@ -119,6 +140,7 @@ class IngestServiceTest {
         final String name;
         int ingestCalls;
         int searchCalls;
+        boolean failOnList;
         final List<KnowledgeBaseSummary> kbs = new ArrayList<>();
 
         FakeBackend(String name) {
@@ -142,6 +164,9 @@ class IngestServiceTest {
 
         @Override
         public List<KnowledgeBaseSummary> listKnowledgeBases() {
+            if (failOnList) {
+                throw new RuntimeException("simulated backend failure");
+            }
             return kbs;
         }
     }
