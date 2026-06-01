@@ -86,12 +86,8 @@ services:
       # re-fetch multi-GB checkpoints.
       - hf-cache:/root/.cache/huggingface
     restart: unless-stopped
-    # Uncomment for GPU acceleration:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - capabilities: [gpu]
+    # For GPU acceleration, layer in docker-compose.gpu.yml — see that file
+    # for the host-side prerequisites and activation commands.
 
   pdf-rag-http:
     build:
