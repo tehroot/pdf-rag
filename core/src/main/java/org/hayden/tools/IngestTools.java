@@ -1,7 +1,10 @@
 package org.hayden.tools;
 
+import io.quarkiverse.mcp.server.ImageContent;
+import io.quarkiverse.mcp.server.TextContent;
 import io.quarkiverse.mcp.server.Tool;
 import io.quarkiverse.mcp.server.ToolArg;
+import io.quarkiverse.mcp.server.ToolResponse;
 import io.smallrye.common.annotation.Blocking;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -140,13 +143,15 @@ public class IngestTools {
 
     @Tool(name = "inspect_page",
             description = """
-                    Retrieve a rendered page image from the Qdrant visual index as base64 PNG.
+                    Retrieve a rendered page image from the Qdrant visual index.
                     Useful when a search hit's text is suspect (e.g. messy OCR) and a
                     multimodal agent wants to read the page directly. Requires that the
-                    KB was ingested with enable_visual_index=true. Returns null fields
-                    if the page isn't in the visual index.""")
+                    KB was ingested with enable_visual_index=true. Returns the PNG as
+                    an MCP image content block (which a vision-capable model sees as
+                    image tokens, not raw base64 in the prompt) plus a small text
+                    block with provenance metadata.""")
     @Blocking
-    public InspectPageResult inspectPage(
+    public ToolResponse inspectPage(
             @ToolArg(description = "Knowledge base / Qdrant collection name.") String kb_name,
             @ToolArg(description = "Document id (from a previous ingest_document result's file_id field).") String doc_id,
             @ToolArg(description = "Page number (1-indexed).") Integer page_number) {
@@ -160,7 +165,17 @@ public class IngestTools {
                     + ". Either the KB has no visual index, the document wasn't ingested with"
                     + " enable_visual_index=true, or the page image has been deleted.");
         }
-        return result;
+        // Two content blocks: a small JSON-ish text summary (provenance the
+        // agent can reason about cheaply) plus the rendered page as an MCP
+        // image so Open WebUI renders it natively and vision models consume
+        // it as image tokens instead of ~100 KB of base64 in the prompt.
+        String summary = String.format(
+                "{\"kbName\":\"%s\",\"docId\":\"%s\",\"pageNumber\":%d,\"width\":%d,\"height\":%d}",
+                result.kbName(), result.docId(), result.pageNumber(),
+                result.width(), result.height());
+        return ToolResponse.success(
+                new TextContent(summary),
+                new ImageContent(result.base64Png(), "image/png"));
     }
 
     @Tool(name = "drop_visual_index",

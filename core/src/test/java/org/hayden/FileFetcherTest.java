@@ -153,6 +153,7 @@ class FileFetcherTest {
         setField(f, "maxFileBytes", 100L * 1024 * 1024);
         setField(f, "connectTimeoutSeconds", 5L);
         setField(f, "requestTimeoutSeconds", 10L);
+        setField(f, "userAgent", "test-agent/1.0");
         // Reflectively invoke @PostConstruct to set up the HttpClient.
         var init = f.getClass().getDeclaredMethod("init");
         init.setAccessible(true);
