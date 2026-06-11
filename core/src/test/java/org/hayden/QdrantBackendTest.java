@@ -9,12 +9,15 @@ import org.hayden.backend.qdrant.Embedder;
 import org.hayden.backend.qdrant.PageRasterizer;
 import org.hayden.backend.qdrant.QdrantBackend;
 import org.hayden.backend.qdrant.QdrantClient;
+import org.hayden.backend.qdrant.StructuralChunker;
+import org.hayden.backend.qdrant.StructuredExtractor;
 import org.hayden.backend.qdrant.TextExtractor;
 import org.hayden.backend.qdrant.TextLayerProbe;
 import org.hayden.backend.KnowledgeBaseSummary;
 import org.hayden.backend.qdrant.fusion.ConfidenceCalculator;
 import org.hayden.backend.qdrant.fusion.FusionEngine;
 import org.hayden.backend.qdrant.fusion.FusionStrategy;
+import org.hayden.backend.qdrant.fusion.ResultDeduper;
 import org.hayden.backend.qdrant.fusion.RrfFusion;
 import org.hayden.backend.qdrant.fusion.WeightedScoreFusion;
 import org.hayden.jobs.IngestQueue;
@@ -107,6 +110,39 @@ class QdrantBackendTest {
     }
 
     @Test
+    void ingest_respectsConfiguredUpsertBatchSize() throws Exception {
+        // Same 3-chunk setup as above, but with upsertBatchSize=2 → expect
+        // two PUTs to /collections/docs/points (2 chunks + 1 chunk).
+        Object chunks = getField(backend, "chunks");
+        setField(chunks, "upsertBatchSize", 2);
+
+        mock.stubFor(post(urlEqualTo("/v1/embeddings"))
+                .willReturn(aResponse().withStatus(200)
+                        .withBody("""
+                                {"data":[
+                                  {"embedding":[0.5,0.5,0.5]},
+                                  {"embedding":[0.5,0.5,0.5]},
+                                  {"embedding":[0.5,0.5,0.5]}
+                                ]}""")));
+        mock.stubFor(get(urlEqualTo("/collections/docs"))
+                .willReturn(aResponse().withStatus(404)));
+        mock.stubFor(put(urlEqualTo("/collections/docs"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+        mock.stubFor(put(urlPathEqualTo("/collections/docs/points"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+
+        String text = "Alpha alpha alpha. Beta beta beta. Gamma gamma gamma gamma.";
+        String b64 = Base64.getEncoder().encodeToString(text.getBytes());
+
+        IngestResult r = backend.ingest(new IngestRequest(
+                SourceType.INLINE, b64, "notes.txt",
+                "docs", null, 0L, "qdrant", Map.of()));
+
+        assertThat(r.chunkCount()).isEqualTo(3);
+        mock.verify(2, putRequestedFor(urlPathEqualTo("/collections/docs/points")));
+    }
+
+    @Test
     void ingest_path_writesPayloadWithChunkText() throws Exception {
         Path tmp = Files.createTempFile("qb-", ".txt");
         Files.writeString(tmp, "alpha beta gamma. delta epsilon zeta. eta theta iota kappa.");
@@ -124,6 +160,8 @@ class QdrantBackendTest {
                             {"result":{
                               "config":{"params":{"vectors":{"size":3,"distance":"Cosine"}}}
                             }}""")));
+            mock.stubFor(put(urlPathEqualTo("/collections/notes/index"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
             mock.stubFor(put(urlPathEqualTo("/collections/notes/points"))
                     .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
 
@@ -134,6 +172,9 @@ class QdrantBackendTest {
             assertThat(r.addedToKb()).isTrue();
             // No collection-create call because the collection already existed.
             mock.verify(0, putRequestedFor(urlEqualTo("/collections/notes")));
+            // Existing collection had no payload_schema → all five payload
+            // indexes get created (doc_id, filename, chunk_index, page_start, page_end).
+            mock.verify(5, putRequestedFor(urlPathEqualTo("/collections/notes/index")));
 
             // Verify the upsert payload mentions our filename and chunk metadata.
             var captured = mock.getAllServeEvents().stream()
@@ -146,6 +187,46 @@ class QdrantBackendTest {
         } finally {
             Files.deleteIfExists(tmp);
         }
+    }
+
+    @Test
+    void ingest_structuralStrategy_storesHeadingPath_andEmbedsBreadcrumb() throws Exception {
+        Object chunks = getField(backend, "chunks");
+        setField(chunks, "chunkStrategy", "structural");
+
+        mock.stubFor(post(urlEqualTo("/v1/embeddings"))
+                .willReturn(aResponse().withStatus(200)
+                        .withBody("{\"data\":[{\"embedding\":[0.1,0.2,0.3]}]}")));
+        mock.stubFor(get(urlEqualTo("/collections/docs"))
+                .willReturn(aResponse().withStatus(404)));
+        mock.stubFor(put(urlEqualTo("/collections/docs"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+        mock.stubFor(put(urlPathEqualTo("/collections/docs/points"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+
+        String html = "<html><body><h1>Install</h1><p>Fans go here.</p></body></html>";
+        String b64 = Base64.getEncoder().encodeToString(html.getBytes());
+
+        IngestResult r = backend.ingest(new IngestRequest(
+                SourceType.INLINE, b64, "guide.html",
+                "docs", null, 0L, "qdrant", null));
+
+        assertThat(r.chunkCount()).isEqualTo(1);
+
+        // Stored payload: clean text + heading_path; no breadcrumb pollution.
+        var upsert = mock.getAllServeEvents().stream()
+                .filter(e -> e.getRequest().getUrl().startsWith("/collections/docs/points"))
+                .findFirst().orElseThrow();
+        String upsertBody = new String(upsert.getRequest().getBody());
+        assertThat(upsertBody).contains("\"heading_path\":[\"Install\"]");
+        assertThat(upsertBody).contains("\"text\":\"Fans go here.\"");
+
+        // Embedded text: breadcrumb prefix + body ("\n" arrives JSON-escaped).
+        var embed = mock.getAllServeEvents().stream()
+                .filter(e -> e.getRequest().getUrl().equals("/v1/embeddings"))
+                .findFirst().orElseThrow();
+        String embedBody = new String(embed.getRequest().getBody());
+        assertThat(embedBody).contains("Install\\nFans go here.");
     }
 
     @Test
@@ -172,6 +253,36 @@ class QdrantBackendTest {
         assertThat(hit.docId()).isEqualTo("d-1");
         assertThat(hit.chunkIndex()).isZero();
         assertThat(hit.score()).isCloseTo(0.92, org.assertj.core.data.Offset.offset(1e-6));
+    }
+
+    @Test
+    void search_collapsesAdjacentChunksOfSameDoc() {
+        mock.stubFor(post(urlEqualTo("/v1/embeddings"))
+                .willReturn(aResponse().withStatus(200)
+                        .withBody("{\"data\":[{\"embedding\":[0.9,0.1,0.0]}]}")));
+        // Chunks 3 and 4 of d-1 are adjacent (they share overlap text) —
+        // only the better-ranked one survives; d-2 backfills.
+        mock.stubFor(post(urlEqualTo("/collections/docs/points/search"))
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":[
+                          {"id":"id-1","score":0.92,
+                            "payload":{"text":"alpha beta","filename":"a.txt",
+                                       "doc_id":"d-1","chunk_index":3,"source":"inline"}},
+                          {"id":"id-2","score":0.91,
+                            "payload":{"text":"beta gamma","filename":"a.txt",
+                                       "doc_id":"d-1","chunk_index":4,"source":"inline"}},
+                          {"id":"id-3","score":0.55,
+                            "payload":{"text":"unrelated","filename":"b.txt",
+                                       "doc_id":"d-2","chunk_index":0,"source":"inline"}}
+                        ]}""")));
+
+        SearchResponse resp = backend.search(new SearchRequest(
+                "qdrant", "docs", "beta", 2, null));
+
+        assertThat(resp.hits()).hasSize(2);
+        assertThat(resp.hits().get(0).docId()).isEqualTo("d-1");
+        assertThat(resp.hits().get(0).chunkIndex()).isEqualTo(3);
+        assertThat(resp.hits().get(1).docId()).isEqualTo("d-2");
     }
 
     @Test
@@ -461,6 +572,7 @@ class QdrantBackendTest {
         setField(pages, "sidecar", sidecar);
         setField(pages, "qdrant", qdrant);
         setField(pages, "imageStore", store);
+        setField(pages, "prefetchMultiplier", 10);
 
         setField(backend, "pages", pages);
         setField(backend, "defaultVisualIndexEnabled", false);
@@ -550,6 +662,19 @@ class QdrantBackendTest {
         setField(chunks, "chunker", chunker);
         setField(chunks, "embedder", embedder);
         setField(chunks, "qdrant", qdrant);
+        setField(chunks, "upsertBatchSize", 128);
+        setField(chunks, "chunkStrategy", "sliding");
+
+        StructuredExtractor structuredExtractor = new StructuredExtractor();
+        setField(structuredExtractor, "maxChars", 10_000_000);
+        setField(structuredExtractor, "headingFontRatio", 1.15);
+        setField(chunks, "structuredExtractor", structuredExtractor);
+
+        StructuralChunker structuralChunker = new StructuralChunker();
+        setField(structuralChunker, "sizeChars", 500);
+        setField(structuralChunker, "breadcrumbMaxChars", 120);
+        setField(structuralChunker, "slidingFallback", chunker);
+        setField(chunks, "structuralChunker", structuralChunker);
 
         // Existing tests use the text path only and don't enable visual index.
         // Wire a no-op ColPaliPipeline that reports the KB has no visual index
@@ -559,6 +684,7 @@ class QdrantBackendTest {
         setField(pages, "rasterizer", new PageRasterizer());
         setField(pages, "textLayerProbe", new TextLayerProbe());
         setField(pages, "qdrant", qdrant);
+        setField(pages, "prefetchMultiplier", 10);
         // sidecar + imageStore stay null — they're only touched when visual is enabled.
 
         // Wire FusionEngine with strategies + ConfidenceCalculator. Existing
@@ -588,6 +714,10 @@ class QdrantBackendTest {
         setField(fusionEngine, "visualScoreFloor", 50.0);
         setField(fusionEngine, "nTextMultiplier", 4);
         setField(fusionEngine, "nPagesMultiplier", 2);
+        ResultDeduper deduper = new ResultDeduper();
+        setField(deduper, "enabled", true);
+        setField(fusionEngine, "deduper", deduper);
+        setField(fusionEngine, "dedupHeadroom", 2);
 
         // Async queue — wired but kept off the hot path for existing tests
         // (threshold = Integer.MAX_VALUE means every PDF runs synchronously).

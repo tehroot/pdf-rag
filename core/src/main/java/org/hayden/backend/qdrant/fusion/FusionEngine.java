@@ -11,6 +11,7 @@ import org.hayden.ingest.IngestException;
 import org.hayden.ingest.SearchHit;
 import org.hayden.ingest.SearchRequest;
 import org.hayden.ingest.SearchResponse;
+import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -41,6 +42,8 @@ import java.util.List;
 @ApplicationScoped
 public class FusionEngine {
 
+    private static final Logger LOG = Logger.getLogger(FusionEngine.class);
+
     public static final String MODE_AUTO = "auto";
     public static final String MODE_FUSION = "fusion";
     public static final String MODE_TEXT_ONLY = "text_only";
@@ -58,6 +61,9 @@ public class FusionEngine {
 
     @Inject
     ConfidenceCalculator confidence;
+
+    @Inject
+    ResultDeduper deduper;
 
     @ConfigProperty(name = "ingest.retrieval.default_mode", defaultValue = "auto")
     String defaultMode;
@@ -85,6 +91,24 @@ public class FusionEngine {
 
     @ConfigProperty(name = "ingest.search.n_pages_multiplier", defaultValue = "2")
     int nPagesMultiplier;
+
+    /**
+     * When true, pre-fusion candidate lists and post-fusion results are logged
+     * at INFO (visible without touching log levels) — the substrate for
+     * retrieval-accuracy debugging. When false, the same lines go to DEBUG and
+     * can be enabled via the
+     * {@code org.hayden.backend.qdrant.fusion} log category.
+     */
+    @ConfigProperty(name = "ingest.search.debug-candidates", defaultValue = "false")
+    boolean debugCandidates;
+
+    /**
+     * Over-fetch factor for dedup: strategies return top-K × headroom hits so
+     * that collapsing duplicates can backfill from next-ranked candidates.
+     * Only applied while dedup is enabled.
+     */
+    @ConfigProperty(name = "ingest.search.dedup.headroom", defaultValue = "2")
+    int dedupHeadroom;
 
     /**
      * The single entry point. Resolves the mode, calls pipelines, fuses,
@@ -137,9 +161,14 @@ public class FusionEngine {
 
     private SearchResponse textOnly(SearchRequest req, int topK, String mode,
                                      List<String> warnings, String kbBackend) {
-        SearchResponse textOnlyResponse = chunks.searchChunks(req);
-        List<SearchHit> hits = textOnlyResponse.hits();
+        long t0 = System.nanoTime();
+        SearchResponse textOnlyResponse = chunks.searchChunks(withTopK(req, fetchK(topK)));
+        List<SearchHit> hits = deduper.collapse(textOnlyResponse.hits(), topK);
         ConfidenceCalculator.Result conf = confidence.annotate(hits, hits, List.of());
+        logTextCandidates(conf.hits());
+        LOG.infof("search kb=%s mode=%s topK=%d hits=%d textMs=%d confidence=%s warnings=%d",
+                req.kbName(), mode, topK, hits.size(), ms(t0, System.nanoTime()),
+                conf.responseConfidence(), warnings.size());
         return new SearchResponse(kbBackend, req.kbName(), mode,
                 conf.responseConfidence(), warnings, conf.hits());
     }
@@ -172,6 +201,10 @@ public class FusionEngine {
                     ph.payload()));
         }
         ConfidenceCalculator.Result conf = confidence.annotate(hits, List.of(), pageHits);
+        logPageCandidates(pageHits);
+        LOG.infof("search kb=%s mode=%s topK=%d hits=%d confidence=%s warnings=%d",
+                req.kbName(), MODE_COLPALI_ONLY, topK, pageHits.size(),
+                conf.responseConfidence(), warnings.size());
         return new SearchResponse(kbBackend, req.kbName(), MODE_COLPALI_ONLY,
                 conf.responseConfidence(), warnings, conf.hits());
     }
@@ -184,8 +217,10 @@ public class FusionEngine {
         SearchRequest textReq = withTopK(req, nText);
         SearchRequest pageReq = withTopK(req, nPages);
 
+        long t0 = System.nanoTime();
         SearchResponse textResp = chunks.searchChunks(textReq);
         List<SearchHit> chunkHits = textResp.hits();
+        long tText = System.nanoTime();
 
         List<PageHit> pageHits;
         try {
@@ -195,14 +230,85 @@ public class FusionEngine {
                     + e.getMessage());
             return textOnly(req, topK, MODE_FALLBACK, warnings, kbBackend);
         }
+        long tVisual = System.nanoTime();
+
+        logTextCandidates(chunkHits);
+        logPageCandidates(pageHits);
 
         FusionStrategy strategy = pickStrategy(req.fusionStrategy());
-        FusionConfig cfg = buildConfig(topK);
+        FusionConfig cfg = buildConfig(fetchK(topK));
         List<SearchHit> fused = strategy.fuse(chunkHits, pageHits, cfg);
+        fused = deduper.collapse(fused, topK);
         ConfidenceCalculator.Result conf = confidence.annotate(fused, chunkHits, pageHits);
+        long tFuse = System.nanoTime();
+
+        logFusedResults(conf.hits());
+        LOG.infof("search kb=%s mode=%s strategy=%s topK=%d nText=%d/%d nPages=%d/%d "
+                        + "textMs=%d visualMs=%d fuseMs=%d confidence=%s warnings=%d",
+                req.kbName(), MODE_FUSION, strategy.name(), topK,
+                chunkHits.size(), nText, pageHits.size(), nPages,
+                ms(t0, tText), ms(tText, tVisual), ms(tVisual, tFuse),
+                conf.responseConfidence(), warnings.size());
 
         return new SearchResponse(kbBackend, req.kbName(), MODE_FUSION,
                 conf.responseConfidence(), warnings, conf.hits());
+    }
+
+    // ---- candidate logging (retrieval-accuracy debugging substrate) ----------
+
+    private boolean candidatesLoggable() {
+        return debugCandidates || LOG.isDebugEnabled();
+    }
+
+    private void candidateLine(String fmt, Object... args) {
+        if (debugCandidates) {
+            LOG.infof(fmt, args);
+        } else {
+            LOG.debugf(fmt, args);
+        }
+    }
+
+    private void logTextCandidates(List<SearchHit> hits) {
+        if (!candidatesLoggable()) return;
+        for (int i = 0; i < hits.size(); i++) {
+            SearchHit h = hits.get(i);
+            candidateLine("text[%d] score=%.4f doc=%s chunk=%d pages=%d-%d \"%s\"",
+                    i, h.score(), h.docId(), h.chunkIndex(), h.pageStart(), h.pageEnd(),
+                    snippet(h.text()));
+        }
+    }
+
+    private void logPageCandidates(List<PageHit> hits) {
+        if (!candidatesLoggable()) return;
+        for (int i = 0; i < hits.size(); i++) {
+            PageHit h = hits.get(i);
+            candidateLine("page[%d] score=%.2f doc=%s page=%d tq=%d file=%s",
+                    i, h.score(), h.docId(), h.pageNumber(), h.textQuality(), h.filename());
+        }
+    }
+
+    private void logFusedResults(List<SearchHit> hits) {
+        if (!candidatesLoggable()) return;
+        for (int i = 0; i < hits.size(); i++) {
+            SearchHit h = hits.get(i);
+            candidateLine("fused[%d] score=%.5f text=%s page=%s conf=%s doc=%s chunk=%d pages=%d-%d",
+                    i, h.score(), fmtScore(h.textScore()), fmtScore(h.pageScore()),
+                    h.confidence(), h.docId(), h.chunkIndex(), h.pageStart(), h.pageEnd());
+        }
+    }
+
+    private static String fmtScore(Double s) {
+        return s == null ? "-" : String.format("%.4f", s);
+    }
+
+    private static String snippet(String text) {
+        if (text == null) return "";
+        String oneLine = text.replaceAll("\\s+", " ").trim();
+        return oneLine.length() <= 80 ? oneLine : oneLine.substring(0, 80) + "…";
+    }
+
+    private static long ms(long fromNanos, long toNanos) {
+        return (toNanos - fromNanos) / 1_000_000;
     }
 
     private FusionStrategy pickStrategy(String requested) {
@@ -220,6 +326,11 @@ public class FusionEngine {
     private FusionConfig buildConfig(int topK) {
         return new FusionConfig(topK, rrfK, weightedText, weightedVisual,
                 textScoreFloor, visualScoreFloor);
+    }
+
+    /** How many hits to pull/fuse before dedup collapses back to topK. */
+    private int fetchK(int topK) {
+        return deduper.enabled() ? topK * Math.max(1, dedupHeadroom) : topK;
     }
 
     private static SearchRequest withTopK(SearchRequest req, int newTopK) {

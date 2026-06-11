@@ -148,6 +148,8 @@ class ColPaliPipelineTest {
         server.stubFor(get(urlEqualTo("/collections/docs_pages"))
                 .willReturn(aResponse().withStatus(200).withBody("""
                         {"result":{"config":{"params":{}}}}""")));
+        server.stubFor(put(urlPathEqualTo("/collections/docs_pages/index"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
         server.stubFor(put(urlPathEqualTo("/collections/docs_pages/points"))
                 .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
 
@@ -159,6 +161,8 @@ class ColPaliPipelineTest {
         server.verify(0, putRequestedFor(urlEqualTo("/collections/docs_pages")));
         // But the points PUT did happen.
         server.verify(putRequestedFor(urlPathEqualTo("/collections/docs_pages/points")));
+        // Payload schema was empty → all three indexes get created.
+        server.verify(3, putRequestedFor(urlPathEqualTo("/collections/docs_pages/index")));
     }
 
     @Test
@@ -203,6 +207,26 @@ class ColPaliPipelineTest {
         assertThat(body).contains("\"limit\":5");
         // Prefetch limit = 10 × topK = 50.
         assertThat(body).contains("\"limit\":50");
+    }
+
+    @Test
+    void searchPages_prefetchLimit_scalesWithConfiguredMultiplier() throws Exception {
+        setField(pipeline, "prefetchMultiplier", 3);
+        server.stubFor(post(urlEqualTo("/embed_query"))
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"vectors":[[0.7,0.3]]}""")));
+        server.stubFor(post(urlEqualTo("/collections/docs_pages/points/query"))
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":{"points":[]}}""")));
+
+        pipeline.searchPages(new SearchRequest("qdrant", "docs", "q", 5, null));
+
+        var captured = server.getAllServeEvents().stream()
+                .filter(e -> e.getRequest().getUrl().startsWith("/collections/docs_pages/points/query"))
+                .findFirst().orElseThrow();
+        String body = new String(captured.getRequest().getBody());
+        // Prefetch limit = 3 × topK = 15.
+        assertThat(body).contains("\"limit\":15");
     }
 
     @Test
@@ -334,6 +358,7 @@ class ColPaliPipelineTest {
         setField(pipeline, "sidecar", sidecar);
         setField(pipeline, "qdrant", qdrant);
         setField(pipeline, "imageStore", store);
+        setField(pipeline, "prefetchMultiplier", 10);
         return pipeline;
     }
 

@@ -2,7 +2,9 @@ package org.hayden.backend.qdrant;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hayden.ingest.FetchedFile;
+import org.jboss.logging.Logger;
 import org.hayden.ingest.IngestException;
 import org.hayden.ingest.IngestRequest;
 import org.hayden.ingest.InspectPageResult;
@@ -34,10 +36,16 @@ import java.util.Map;
 @ApplicationScoped
 public class ColPaliPipeline {
 
+    private static final Logger LOG = Logger.getLogger(ColPaliPipeline.class);
+
     static final String PAGES_COLLECTION_SUFFIX = "_pages";
 
-    /** Internal prefetch limit multiplier — pull 10× the final top-N from each pooled vector. */
-    static final int PREFETCH_MULTIPLIER = 10;
+    /** Payload fields indexed for filtering, created idempotently at ingest time. */
+    private static final Map<String, String> INDEXED_PAYLOAD_FIELDS = indexedPayloadFields();
+
+    /** Prefetch limit multiplier — pull N× the final top-K from each pooled vector. */
+    @ConfigProperty(name = "ingest.colpali.prefetch-multiplier", defaultValue = "10")
+    int prefetchMultiplier;
 
     /** Default top-K for searchPages when the caller doesn't specify. */
     private static final int DEFAULT_SEARCH_TOP_K = 10;
@@ -104,8 +112,10 @@ public class ColPaliPipeline {
             throw new IngestException("docId is required for visual ingest");
         }
 
+        long t0 = System.nanoTime();
         // Render every page. Non-PDF inputs throw inside the rasterizer.
         List<PageRasterizer.RenderedPage> rendered = rasterizer.renderAll(file);
+        long tRender = System.nanoTime();
 
         // Probe text quality per page (drives confidence weighting later).
         List<TextLayerProbe.PageQuality> qualities = textLayerProbe.probe(file);
@@ -127,7 +137,9 @@ public class ColPaliPipeline {
             String pageId = docId + ":" + page.pageNumber();
             sidecarInputs.add(new ColPaliClient.PageInput(pageId, page.pngBytes()));
         }
+        long tStore = System.nanoTime();
         List<ColPaliClient.PageEmbedding> embeddings = sidecar.embedPages(sidecarInputs);
+        long tEmbed = System.nanoTime();
         if (embeddings.size() != rendered.size()) {
             throw new IngestException("Sidecar returned " + embeddings.size()
                     + " embeddings for " + rendered.size() + " rendered pages");
@@ -141,6 +153,7 @@ public class ColPaliPipeline {
         namedVectors.put("pooled_rows", QdrantClient.MultiVectorConfig.pooled(vectorDim));
         namedVectors.put("pooled_cols", QdrantClient.MultiVectorConfig.pooled(vectorDim));
         qdrant.ensureMultivectorCollection(pagesCollection, namedVectors);
+        qdrant.ensurePayloadIndexes(pagesCollection, INDEXED_PAYLOAD_FIELDS);
 
         // Build multivector points.
         Map<String, Object> userMeta = req.metadata() == null ? Map.of() : req.metadata();
@@ -178,6 +191,12 @@ public class ColPaliPipeline {
 
         qdrant.upsertMultivectorPoints(pagesCollection, points);
 
+        LOG.infof("ingest visual kb=%s doc=%s file=%s pages=%d dim=%d "
+                        + "render=%dms probe+store=%dms embed=%dms upsert=%dms",
+                req.kbName(), docId, file.filename(), rendered.size(), vectorDim,
+                ms(t0, tRender), ms(tRender, tStore), ms(tStore, tEmbed),
+                ms(tEmbed, System.nanoTime()));
+
         return new PagesIngestResult(pagesCollection, docId, rendered.size(), vectorDim);
     }
 
@@ -194,9 +213,15 @@ public class ColPaliPipeline {
             throw new IngestException("query is required for visual search");
         }
         int topK = req.topK() <= 0 ? DEFAULT_SEARCH_TOP_K : req.topK();
-        int prefetchLimit = topK * PREFETCH_MULTIPLIER;
+        if (prefetchMultiplier <= 0) {
+            throw new IngestException("ingest.colpali.prefetch-multiplier must be > 0 (got "
+                    + prefetchMultiplier + ")");
+        }
+        int prefetchLimit = topK * prefetchMultiplier;
 
+        long t0 = System.nanoTime();
         float[][] queryVectors = sidecar.embedQuery(req.query());
+        long tEmbed = System.nanoTime();
 
         List<QdrantClient.PrefetchSpec> prefetches = List.of(
                 new QdrantClient.PrefetchSpec("pooled_rows", queryVectors, prefetchLimit),
@@ -205,6 +230,9 @@ public class ColPaliPipeline {
         String pagesCollection = pagesCollectionName(req.kbName());
         List<QdrantClient.SearchHitRaw> raw = qdrant.queryMultistage(
                 pagesCollection, prefetches, "original", queryVectors, topK, req.filter());
+        LOG.debugf("search visual kb=%s topK=%d prefetchLimit=%d embed=%dms multistage=%dms hits=%d",
+                req.kbName(), topK, prefetchLimit, ms(t0, tEmbed),
+                ms(tEmbed, System.nanoTime()), raw.size());
 
         List<PageHit> out = new ArrayList<>(raw.size());
         for (QdrantClient.SearchHitRaw r : raw) {
@@ -314,6 +342,18 @@ public class ColPaliPipeline {
             // mid-flight. We've already proven the sidecar works via embedPages.
             return "unknown";
         }
+    }
+
+    private static long ms(long fromNanos, long toNanos) {
+        return (toNanos - fromNanos) / 1_000_000;
+    }
+
+    private static Map<String, String> indexedPayloadFields() {
+        Map<String, String> m = new LinkedHashMap<>();
+        m.put("doc_id", "keyword");
+        m.put("filename", "keyword");
+        m.put("page_number", "integer");
+        return m;
     }
 
     private static String asString(Object o) {

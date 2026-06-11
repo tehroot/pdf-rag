@@ -41,6 +41,7 @@ search them. Two backends, picked per-call or by environment default:
 | [components/](components/README.md) | Per-component deep dives — one walkthrough per core part of the application. Start here if you're working on the code. |
 | [deployment.md](deployment.md) | Building both transports, environment variables, running Qdrant + llama-server + this server locally, container/systemd patterns. |
 | [mcp-integration.md](mcp-integration.md) | Wiring this server into local LLM stacks that speak MCP: Claude Desktop, Cline / VS Code agents, Open WebUI, browser hosts. |
+| [eval/retrieval-eval.md](eval/retrieval-eval.md) | Retrieval-accuracy eval protocol: gold doc/query sets, page-level hit@K / MRR, side-by-side KB comparison (e.g. sliding vs structural chunking), candidate-log debugging. |
 
 ## Tool surface (what an agent sees)
 

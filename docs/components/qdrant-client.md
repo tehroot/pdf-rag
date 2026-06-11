@@ -6,7 +6,7 @@ same pattern as `Embedder`, `ColPaliClient`, and `OpenWebUiClient`.
 
 ## What it does
 
-Eleven public methods covering the endpoints both pipelines need:
+Twelve public methods covering the endpoints both pipelines need:
 
 | Method | Endpoint | Use |
 |--------|----------|-----|
@@ -15,6 +15,7 @@ Eleven public methods covering the endpoints both pipelines need:
 | `createCollection(name, dim)` | `PUT /collections/{name}` | Single-vector collection with Cosine distance. |
 | `ensureCollection(name, dim)` | get + create | Idempotent helper; rejects dim mismatch. |
 | `deleteCollection(name)` | `DELETE /collections/{name}` | Idempotent on 404. |
+| `ensurePayloadIndexes(coll, fields)` | `GET` + `PUT /collections/{name}/index?wait=true` | Diff `payload_schema`, create only missing indexes. See below. |
 | `upsertPoints(coll, points)` | `PUT /collections/{name}/points?wait=true` | Single-vector upsert. |
 | `search(coll, vec, topK, filter)` | `POST /collections/{name}/points/search` | Single-vector ANN search with optional payload filter. |
 | **`createMultivectorCollection(name, namedVectors)`** | `PUT /collections/{name}` | Multivector collection with named vectors, MAX_SIM, binary quantization. |
@@ -49,6 +50,49 @@ Unchanged from earlier. See [original-style docs] for the basic shapes:
 
 `ensureCollection` checks for dim mismatch and throws — protects against
 switching `EMBED_MODEL` without re-creating the collection.
+
+## Payload indexes
+
+Without payload indexes, Qdrant evaluates `doc_id` / `filename` filters by
+scanning every point — functional but O(collection). Both pipelines call
+`ensurePayloadIndexes` on every ingest, right after their ensure-collection
+step:
+
+```java
+public void ensurePayloadIndexes(String collection, Map<String, String> fieldSchemas)
+```
+
+```mermaid
+sequenceDiagram
+    participant P as ChunkPipeline / ColPaliPipeline
+    participant Q as QdrantClient
+    participant S as Qdrant
+
+    P->>Q: ensurePayloadIndexes(kb, {doc_id: keyword, …})
+    Q->>S: GET /collections/{kb}
+    alt collection missing (404)
+        Q-->>P: no-op (race with delete; next ingest retries)
+    else exists
+        S-->>Q: CollectionInfo incl. payload_schema
+        loop each field NOT in payload_schema
+            Q->>S: PUT /collections/{kb}/index?wait=true<br/>{"field_name", "field_schema"}
+            Note over Q,S: 4xx "already exists" tolerated<br/>(concurrent indexer)
+        end
+    end
+```
+
+The diff against `payload_schema` (now parsed on `CollectionInfo`) makes the
+common case — all indexes already present — cost nothing beyond the GET that
+the ensure-collection flow performs anyway. Fields indexed:
+
+| Collection | keyword | integer |
+|---|---|---|
+| `<kb>` (chunks) | `doc_id`, `filename` | `chunk_index`, `page_start`, `page_end` |
+| `<kb>_pages` | `doc_id`, `filename` | `page_number` |
+
+Because this runs at ingest time, a pre-existing collection gets its indexes
+on the *next* ingest into it; an idle collection stays unindexed until then
+(or index it manually with the same `PUT`).
 
 ## Multivector ops (visual pipeline) — NEW
 

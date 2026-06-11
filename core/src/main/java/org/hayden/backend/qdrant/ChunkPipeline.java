@@ -2,7 +2,9 @@ package org.hayden.backend.qdrant;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hayden.backend.KnowledgeBaseSummary;
+import org.jboss.logging.Logger;
 import org.hayden.ingest.FetchedFile;
 import org.hayden.ingest.IngestException;
 import org.hayden.ingest.IngestRequest;
@@ -30,16 +32,42 @@ import java.util.UUID;
 @ApplicationScoped
 public class ChunkPipeline {
 
-    /** Qdrant upsert batch size. */
-    private static final int UPSERT_BATCH = 128;
+    private static final Logger LOG = Logger.getLogger(ChunkPipeline.class);
 
     public static final String BACKEND_NAME = "qdrant";
+
+    /**
+     * Payload fields indexed for filtering, created idempotently at ingest
+     * time right after ensureCollection. doc_id/filename back the search
+     * filter path; the integer fields back fusion's chunk↔page join and
+     * adjacency checks.
+     */
+    private static final Map<String, String> INDEXED_PAYLOAD_FIELDS = indexedPayloadFields();
+
+    /** Qdrant upsert batch size. */
+    @ConfigProperty(name = "ingest.qdrant.upsert-batch-size", defaultValue = "128")
+    int upsertBatchSize;
+
+    /**
+     * "sliding" (default) = flat per-page extraction + sliding-window chunker.
+     * "structural" = block extraction (headings/lists/tables) + structural
+     * packing with heading breadcrumbs; falls back to sliding per-file when
+     * structured extraction fails.
+     */
+    @ConfigProperty(name = "ingest.chunk.strategy", defaultValue = "sliding")
+    String chunkStrategy;
 
     @Inject
     TextExtractor extractor;
 
     @Inject
     Chunker chunker;
+
+    @Inject
+    StructuredExtractor structuredExtractor;
+
+    @Inject
+    StructuralChunker structuralChunker;
 
     @Inject
     Embedder embedder;
@@ -63,17 +91,37 @@ public class ChunkPipeline {
         if (docId == null || docId.isBlank()) {
             throw new IngestException("docId is required for chunk ingest");
         }
-        List<PageText> pages = extractor.extractPerPage(file);
-        List<Chunk> chunks = chunker.chunkPerPage(pages);
+        long t0 = System.nanoTime();
+        List<Chunk> chunks = null;
+        int pageCount;
+        if ("structural".equalsIgnoreCase(chunkStrategy)) {
+            try {
+                List<Block> blocks = structuredExtractor.extractBlocks(file);
+                chunks = structuralChunker.chunkBlocks(blocks);
+            } catch (RuntimeException e) {
+                LOG.warnf("Structured extraction failed for %s (%s); "
+                        + "falling back to sliding-window chunking",
+                        file.filename(), e.getMessage());
+            }
+        }
+        if (chunks == null) {
+            List<PageText> pages = extractor.extractPerPage(file);
+            chunks = chunker.chunkPerPage(pages);
+            pageCount = pages.size();
+        } else {
+            pageCount = chunks.stream().mapToInt(Chunk::pageEnd).max().orElse(1);
+        }
+        long tChunk = System.nanoTime();
         if (chunks.isEmpty()) {
             throw new IngestException("Chunker produced 0 chunks for " + file.filename());
         }
 
         List<String> chunkTexts = new ArrayList<>(chunks.size());
         for (Chunk c : chunks) {
-            chunkTexts.add(c.text());
+            chunkTexts.add(c.embeddingText());
         }
         List<float[]> vectors = embedder.embed(chunkTexts);
+        long tEmbed = System.nanoTime();
         if (vectors.size() != chunks.size()) {
             throw new IngestException("Embedder returned " + vectors.size()
                     + " vectors for " + chunks.size() + " chunks");
@@ -81,6 +129,7 @@ public class ChunkPipeline {
         int dim = vectors.get(0).length;
 
         qdrant.ensureCollection(req.kbName(), dim);
+        qdrant.ensurePayloadIndexes(req.kbName(), INDEXED_PAYLOAD_FIELDS);
 
         Map<String, Object> userMeta = req.metadata() == null ? Map.of() : req.metadata();
 
@@ -93,10 +142,20 @@ public class ChunkPipeline {
             points.add(new QdrantClient.Point(pointId, vectors.get(i), payload));
         }
 
-        for (int i = 0; i < points.size(); i += UPSERT_BATCH) {
-            int end = Math.min(i + UPSERT_BATCH, points.size());
+        if (upsertBatchSize <= 0) {
+            throw new IngestException("ingest.qdrant.upsert-batch-size must be > 0 (got "
+                    + upsertBatchSize + ")");
+        }
+        for (int i = 0; i < points.size(); i += upsertBatchSize) {
+            int end = Math.min(i + upsertBatchSize, points.size());
             qdrant.upsertPoints(req.kbName(), points.subList(i, end));
         }
+        long tUpsert = System.nanoTime();
+
+        LOG.infof("ingest text kb=%s doc=%s file=%s strategy=%s pages=%d chunks=%d "
+                        + "extract+chunk=%dms embed=%dms upsert=%dms",
+                req.kbName(), docId, file.filename(), chunkStrategy, pageCount, chunks.size(),
+                ms(t0, tChunk), ms(tChunk, tEmbed), ms(tEmbed, tUpsert));
 
         return new IngestResult(BACKEND_NAME, req.kbName(), req.kbName(), docId,
                 "completed", chunks.size(), true,
@@ -111,9 +170,13 @@ public class ChunkPipeline {
         if (req.query() == null || req.query().isBlank()) {
             throw new IngestException("query is required for search");
         }
+        long t0 = System.nanoTime();
         float[] qv = embedder.embedOne(req.query());
+        long tEmbed = System.nanoTime();
         int topK = req.topK() <= 0 ? 5 : req.topK();
         List<QdrantClient.SearchHitRaw> raw = qdrant.search(req.kbName(), qv, topK, req.filter());
+        LOG.debugf("search text kb=%s topK=%d embed=%dms qdrant=%dms hits=%d",
+                req.kbName(), topK, ms(t0, tEmbed), ms(tEmbed, System.nanoTime()), raw.size());
         List<SearchHit> hits = new ArrayList<>(raw.size());
         for (QdrantClient.SearchHitRaw r : raw) {
             Map<String, Object> p = r.payload() == null ? Map.of() : r.payload();
@@ -181,12 +244,29 @@ public class ChunkPipeline {
         payload.put("content_type", file.contentType());
         payload.put("char_start", c.startOffset());
         payload.put("char_end", c.endOffset());
+        if (c.headingPath() != null && !c.headingPath().isEmpty()) {
+            payload.put("heading_path", c.headingPath());
+        }
         for (Map.Entry<String, Object> e : userMeta.entrySet()) {
             payload.putIfAbsent(e.getKey(), e.getValue());
         }
         // embed_model goes in after user metadata so callers can't spoof it.
         payload.put("embed_model", embedModel);
         return payload;
+    }
+
+    private static long ms(long fromNanos, long toNanos) {
+        return (toNanos - fromNanos) / 1_000_000;
+    }
+
+    private static Map<String, String> indexedPayloadFields() {
+        Map<String, String> m = new LinkedHashMap<>();
+        m.put("doc_id", "keyword");
+        m.put("filename", "keyword");
+        m.put("chunk_index", "integer");
+        m.put("page_start", "integer");
+        m.put("page_end", "integer");
+        return m;
     }
 
     private static String asString(Object o) {

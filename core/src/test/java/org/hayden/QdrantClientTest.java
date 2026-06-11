@@ -85,6 +85,86 @@ class QdrantClientTest {
     }
 
     @Test
+    void ensurePayloadIndexes_createsOnlyMissing() {
+        // doc_id is already indexed; filename + chunk_index are not.
+        server.stubFor(get(urlEqualTo("/collections/docs"))
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":{
+                          "config":{"params":{"vectors":{"size":3,"distance":"Cosine"}}},
+                          "payload_schema":{"doc_id":{"data_type":"keyword","points":42}}
+                        }}""")));
+        server.stubFor(put(urlPathEqualTo("/collections/docs/index"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+
+        Map<String, String> fields = new java.util.LinkedHashMap<>();
+        fields.put("doc_id", "keyword");
+        fields.put("filename", "keyword");
+        fields.put("chunk_index", "integer");
+        client.ensurePayloadIndexes("docs", fields);
+
+        server.verify(2, putRequestedFor(urlPathEqualTo("/collections/docs/index")));
+        server.verify(putRequestedFor(urlPathEqualTo("/collections/docs/index"))
+                .withRequestBody(matchingJsonPath("$.field_name", equalTo("filename")))
+                .withRequestBody(matchingJsonPath("$.field_schema", equalTo("keyword"))));
+        server.verify(putRequestedFor(urlPathEqualTo("/collections/docs/index"))
+                .withRequestBody(matchingJsonPath("$.field_name", equalTo("chunk_index")))
+                .withRequestBody(matchingJsonPath("$.field_schema", equalTo("integer"))));
+    }
+
+    @Test
+    void ensurePayloadIndexes_noopWhenAllPresent() {
+        server.stubFor(get(urlEqualTo("/collections/docs"))
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":{
+                          "payload_schema":{
+                            "doc_id":{"data_type":"keyword"},
+                            "filename":{"data_type":"keyword"}
+                          }
+                        }}""")));
+
+        client.ensurePayloadIndexes("docs", Map.of(
+                "doc_id", "keyword", "filename", "keyword"));
+
+        server.verify(0, putRequestedFor(urlPathEqualTo("/collections/docs/index")));
+    }
+
+    @Test
+    void ensurePayloadIndexes_noopWhenCollectionMissing() {
+        server.stubFor(get(urlEqualTo("/collections/gone"))
+                .willReturn(aResponse().withStatus(404)));
+
+        client.ensurePayloadIndexes("gone", Map.of("doc_id", "keyword"));
+
+        server.verify(0, putRequestedFor(urlPathEqualTo("/collections/gone/index")));
+    }
+
+    @Test
+    void ensurePayloadIndexes_toleratesAlreadyExists() {
+        server.stubFor(get(urlEqualTo("/collections/docs"))
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":{"payload_schema":{}}}""")));
+        server.stubFor(put(urlPathEqualTo("/collections/docs/index"))
+                .willReturn(aResponse().withStatus(400).withBody("""
+                        {"status":{"error":"index for field doc_id already exists"}}""")));
+
+        // Must not throw.
+        client.ensurePayloadIndexes("docs", Map.of("doc_id", "keyword"));
+    }
+
+    @Test
+    void ensurePayloadIndexes_throwsOnOtherErrors() {
+        server.stubFor(get(urlEqualTo("/collections/docs"))
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":{"payload_schema":{}}}""")));
+        server.stubFor(put(urlPathEqualTo("/collections/docs/index"))
+                .willReturn(aResponse().withStatus(500).withBody("boom")));
+
+        assertThatThrownBy(() -> client.ensurePayloadIndexes("docs", Map.of("doc_id", "keyword")))
+                .isInstanceOf(IngestException.class)
+                .hasMessageContaining("HTTP 500");
+    }
+
+    @Test
     void ensureCollection_createsWhenMissing() {
         server.stubFor(get(urlEqualTo("/collections/new"))
                 .willReturn(aResponse().withStatus(404)));

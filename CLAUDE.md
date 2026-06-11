@@ -90,6 +90,9 @@ core/src/main/java/org/hayden/
     │   ├── PageHit.java
     │   ├── TextExtractor.java          # Tika (single-blob) + PDFBox (per-page for PDFs)
     │   ├── Chunker.java                # sliding window, page-tagged chunks
+    │   ├── StructuredExtractor.java    # block extraction: Tika XHTML / PDF font heuristics
+    │   ├── StructuralChunker.java      # packs Blocks into chunks + heading breadcrumbs
+    │   ├── Block.java                  # HEADING/PARAGRAPH/LIST/TABLE + headingPath
     │   ├── Embedder.java               # OpenAI-compatible /v1/embeddings
     │   ├── QdrantClient.java           # REST: collections + points + multivector + multistage
     │   ├── PageRasterizer.java         # PDFBox PDFRenderer → PNG
@@ -105,6 +108,7 @@ core/src/main/java/org/hayden/
     │       ├── WeightedScoreFusion.java
     │       ├── FusionConfig.java
     │       ├── ConfidenceCalculator.java
+    │       ├── ResultDeduper.java      # collapses overlapping chunks in results
     │       └── FusionEngine.java       # resolves mode + dispatches + annotates
     └── openwebui/
         ├── OpenWebUiBackend.java       # implements Backend
@@ -134,7 +138,14 @@ then delegate.
 4. Pre-flight sidecar health check if visual requested → hard-fail if down.
 5. **Always:** `ChunkPipeline.ingestChunks(req, file, docId)` →
    `TextExtractor.extractPerPage` → `Chunker.chunkPerPage` → `Embedder.embed`
-   → `QdrantClient.upsertPoints` to `<kb>` collection.
+   → `QdrantClient.upsertPoints` to `<kb>` collection. With
+   `ingest.chunk.strategy=structural` the extract+chunk steps become
+   `StructuredExtractor.extractBlocks` → `StructuralChunker.chunkBlocks`
+   (heading-aware packing; embedded text gets a heading-breadcrumb prefix via
+   `Chunk.embeddingText()`, stored `text` stays clean, payload gains
+   `heading_path`); falls back to sliding per-file on extraction failure.
+   Payload indexes (doc_id, filename, chunk_index, page_start, page_end) are
+   ensured idempotently on every ingest.
 6. **If `enable_visual_index=true`:** `ColPaliPipeline.ingestPages(req, file, docId)`
    → `PageRasterizer.renderAll` → `TextLayerProbe.probe` →
    `PageImageStore.store` → `ColPaliClient.embedPages` →
@@ -173,6 +184,13 @@ At-least-once on restart: any `IN_PROGRESS` job at startup is requeued
 3. Pre-fusion list sizes: `nText = 4 × top_k`, `nPages = 2 × top_k`.
 4. Apply `FusionStrategy` (`RrfFusion` default, `WeightedScoreFusion`
    alternative). Joins chunks to pages via `(docId, pageStart..pageEnd)`.
+   Strategies return `top_k × ingest.search.dedup.headroom` hits;
+   `ResultDeduper` then collapses overlapping chunks of the same doc
+   (char-range overlap when offsets present, chunk-index adjacency otherwise)
+   back down to `top_k`, backfilling from deeper candidates.
+   Set `INGEST_SEARCH_DEBUG_CANDIDATES=true` to log pre-fusion candidate
+   lists + post-fusion scores at INFO on every search (the retrieval-accuracy
+   debugging substrate; see docs/eval/retrieval-eval.md).
 5. Annotate via `ConfidenceCalculator`:
    `0.4 × text * text_trust + 0.4 × visual + 0.2 × agreement`,
    bucketed high (>0.7) / medium (>0.4) / low. Response confidence = max of
@@ -228,11 +246,14 @@ model-agnostic via `/info`.
 - **`/api/v1/knowledge/` returns `{items, total}`**, not a bare array. Open
   WebUI's real shape drifts from its docs. `KnowledgePage` wraps it.
 
-- **Point IDs are UUID v5, deterministic.**
+- **Point IDs are UUID v5, deterministic — but docId is random per ingest.**
   `UuidV5.forChunk(docId, chunkIndex)` and `UuidV5.forPage(docId, pageNumber)`
-  produce identical IDs given identical inputs. Same doc + same chunking →
-  idempotent overwrite; different chunking → duplicate copy. No dedupe by
-  source URL.
+  produce identical IDs given identical inputs, but `QdrantBackend.ingest`
+  generates a fresh `docId = UUID.randomUUID()` every call, so re-ingesting
+  the same file ALWAYS creates new points and the old copy's chunks remain.
+  The idempotent-overwrite property only applies within one docId (i.e.
+  queue-worker retries). Before/after chunking comparisons must use fresh KBs
+  (see docs/eval/retrieval-eval.md); no dedupe by source URL.
 
 - **`<kb>_pages` is the visual-index capability flag.** Implicit state.
   `ColPaliPipeline.isEnabledFor(kbName)` calls `qdrant.getCollection(<kb>_pages)
@@ -257,6 +278,13 @@ Env vars (consumed via `@ConfigProperty`, see
 | `EMBED_BATCH_SIZE` | batch size per `/embeddings` | `64` |
 | `INGEST_CHUNK_SIZE_CHARS` | chunk size in characters | `1500` |
 | `INGEST_CHUNK_OVERLAP_CHARS` | adjacent-chunk overlap | `200` |
+| `INGEST_CHUNK_STRATEGY` | `sliding` or `structural` (heading-aware + breadcrumbs) | `sliding` |
+| `INGEST_CHUNK_HEADING_FONT_RATIO` | PDF heading threshold vs body font | `1.15` |
+| `INGEST_CHUNK_BREADCRUMB_MAX_CHARS` | cap on breadcrumb prefix in embedded text | `120` |
+| `INGEST_QDRANT_UPSERT_BATCH` | points per Qdrant upsert call | `128` |
+| `COLPALI_PREFETCH_MULTIPLIER` | multistage prefetch = N × top_k | `10` |
+| `INGEST_SEARCH_DEBUG_CANDIDATES` | log candidate lists + scores at INFO | `false` |
+| `INGEST_SEARCH_DEDUP` | collapse overlapping chunks in results | `true` |
 | `COLPALI_SIDECAR_URL` | sidecar root | `http://localhost:8090` |
 | `COLPALI_BATCH_SIZE` | client-side batch for `/embed_pages` | `8` |
 | `INGEST_PAGE_STORE_IMPL` | `filesystem` (only v1) | `filesystem` |
@@ -278,6 +306,7 @@ list in [docs/architecture.md](docs/architecture.md).
 | GET | `/collections/{name}` | get (returns 404 → null) |
 | PUT | `/collections/{name}` | create (single-vector or multivector named) |
 | DELETE | `/collections/{name}` | delete (idempotent on 404) |
+| PUT | `/collections/{name}/index?wait=true` | create payload index (idempotent via payload_schema diff) |
 | PUT | `/collections/{name}/points?wait=true` | upsert (single or multivector) |
 | POST | `/collections/{name}/points/search` | single-vector ANN search |
 | POST | `/collections/{name}/points/query` | multistage prefetch+rerank query |

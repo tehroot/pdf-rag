@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Plain java.net.http client for Qdrant's REST API. We talk to /collections
@@ -121,6 +122,47 @@ public class QdrantClient {
                 .PUT(HttpRequest.BodyPublishers.ofByteArray(writeJson(body)))
                 .build();
         sendExpectingSuccess(req);
+    }
+
+    /**
+     * Idempotently create payload indexes on {@code collection}. Reads the
+     * collection's current {@code payload_schema} and only issues
+     * {@code PUT /collections/{name}/index} for fields not yet indexed, so the
+     * common case (all indexes present) costs nothing beyond the GET the
+     * caller's ensure-collection flow already performs.
+     *
+     * <p>No-ops when the collection doesn't exist (race with a concurrent
+     * delete — the next ingest retries). Tolerates "already exists" 4xx
+     * responses from concurrent indexers.
+     */
+    public void ensurePayloadIndexes(String collection, Map<String, String> fieldSchemas) {
+        CollectionInfo info = getCollection(collection);
+        if (info == null) {
+            return;
+        }
+        Set<String> indexed = info.indexedFields();
+        for (Map.Entry<String, String> e : fieldSchemas.entrySet()) {
+            if (indexed.contains(e.getKey())) {
+                continue;
+            }
+            Map<String, Object> body = Map.of(
+                    "field_name", e.getKey(),
+                    "field_schema", e.getValue());
+            HttpRequest req = builder("/collections/" + encode(collection) + "/index?wait=true")
+                    .header("Content-Type", "application/json")
+                    .PUT(HttpRequest.BodyPublishers.ofByteArray(writeJson(body)))
+                    .build();
+            HttpResponse<byte[]> resp = sendRaw(req);
+            if (resp.statusCode() / 100 != 2) {
+                String respBody = new String(resp.body(), StandardCharsets.UTF_8);
+                if (resp.statusCode() / 100 == 4 && respBody.contains("already exists")) {
+                    continue;
+                }
+                throw new IngestException("Qdrant PUT /collections/" + collection + "/index"
+                        + " (field " + e.getKey() + ") returned HTTP "
+                        + resp.statusCode() + ": " + respBody);
+            }
+        }
     }
 
     public void ensureCollection(String name, int dim) {
@@ -480,6 +522,12 @@ public class QdrantClient {
         public long points_count;
         public long vectors_count;
         public Config config;
+        public Map<String, Object> payload_schema;
+
+        /** Names of payload fields that already have an index. */
+        public Set<String> indexedFields() {
+            return payload_schema == null ? Set.of() : payload_schema.keySet();
+        }
 
         public Integer dim() {
             if (config != null && config.params != null && config.params.vectors != null) {

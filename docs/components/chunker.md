@@ -9,6 +9,12 @@ work.
 Pure logic, no I/O. Trivially testable and the most "tunable" piece of the
 pipeline.
 
+This is the `sliding` strategy — the default (`ingest.chunk.strategy=sliding`)
+and the per-file fallback when the `structural` strategy's extraction fails.
+It also handles oversize blocks *inside* the structural path (a single
+block longer than the chunk budget is delegated here). See
+[structural-chunker.md](structural-chunker.md) for the alternative.
+
 ## What it does
 
 A sliding-window chunker with three behaviors layered on top:
@@ -39,9 +45,14 @@ A sliding-window chunker with three behaviors layered on top:
 ```java
 public record PageText(int pageNumber, String text);
 public record Chunk(int index, int startOffset, int endOffset, String text,
-                    int pageStart, int pageEnd) {
-    // Back-compat constructor: pageStart = pageEnd = 1.
-    public Chunk(int index, int startOffset, int endOffset, String text);
+                    int pageStart, int pageEnd,
+                    String embeddingTextOverride,   // structural strategy only; null here
+                    List<String> headingPath) {     // structural strategy only; null here
+    // Back-compat constructors used by this chunker:
+    public Chunk(int index, int startOffset, int endOffset, String text);                      // pages = (1,1)
+    public Chunk(int index, int startOffset, int endOffset, String text, int pStart, int pEnd);
+    // What the Embedder receives; defaults to text() when no override is set.
+    public String embeddingText();
 }
 
 @ConfigProperty(name = "ingest.chunk.size-chars",    defaultValue = "1500") int sizeChars;

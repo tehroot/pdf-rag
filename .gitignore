@@ -42,3 +42,6 @@ build/
 .env
 /models/
 /.pdf-rag-ingest/
+
+### Retrieval eval (docs may be large / non-redistributable) ###
+/eval/docs/

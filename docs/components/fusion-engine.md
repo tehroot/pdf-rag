@@ -194,13 +194,14 @@ public SearchResponse search(SearchRequest req, String kbBackend) {
     String mode = resolveMode(requested, visualAvailable, warnings);
 
     switch (mode) {
-        case TEXT_ONLY, FALLBACK     → run chunks.searchChunks, confidence, return
+        case TEXT_ONLY, FALLBACK     → run chunks.searchChunks (over-fetched), dedup, confidence, return
         case COLPALI_ONLY            → run pages.searchPages, promote to SearchHits, confidence, return
         case FUSION:
             int nText = topK * nTextMultiplier;     // default 4×topK = 20 chunks
             int nPages = topK * nPagesMultiplier;   // default 2×topK = 10 pages
             run both pipelines with deeper limits
-            strategy.fuse(chunks, pages, config)
+            strategy.fuse(chunks, pages, config(topK × dedup headroom))
+            deduper.collapse(fused, topK)            // see result-deduper.md
             confidence.annotate(fused, chunks, pages)
             return SearchResponse(fusion_mode, response_confidence, warnings, hits)
     }
@@ -210,6 +211,32 @@ public SearchResponse search(SearchRequest req, String kbBackend) {
 The deeper pull from each pipeline (4× and 2× the final topK) is for RRF
 recall: items that rank #(topK+1) in one pipeline but high in the other still
 get a chance to be fused.
+
+After fusing, the strategy's output (over-fetched at `topK × headroom`) goes
+through [ResultDeduper](result-deduper.md), which collapses overlapping
+chunks of the same doc and backfills the freed slots. Confidence annotation
+runs on the post-dedup list — response-level confidence must describe the
+hits the agent actually receives.
+
+### Candidate logging
+
+The engine is the observation point for retrieval-accuracy debugging. With
+`ingest.search.debug-candidates=true` (env `INGEST_SEARCH_DEBUG_CANDIDATES`),
+every search logs at INFO:
+
+```
+text[0]  score=0.8123 doc=… chunk=14 pages=12-12 "Operating range: -10..70 °C …"
+page[0]  score=18.42  doc=… page=12 tq=2 file=thermal-spec.pdf
+fused[0] score=0.03279 text=0.8123 page=18.4200 conf=high doc=… chunk=14 pages=12-12
+search kb=docs mode=fusion strategy=rrf topK=5 nText=18/20 nPages=10/10 textMs=12 visualMs=85 fuseMs=1 confidence=high warnings=0
+```
+
+— the pre-fusion candidate lists from both pipelines, the post-fusion top-K
+with score components, and a per-search timing summary. With the flag off the
+same lines log at DEBUG (category
+`org.hayden.backend.qdrant.fusion`). This is the substrate for the eval
+protocol in [../eval/retrieval-eval.md](../eval/retrieval-eval.md). Safe on
+stdio: logs route to stderr.
 
 ## Configuration
 
@@ -224,6 +251,9 @@ get a chance to be fused.
 | `ingest.fusion.weighted.visual_score_floor` | `50.0` | Empirical ColPali MAX_SIM cap. |
 | `ingest.search.n_text_multiplier` | `4` | Chunks pulled pre-fusion = N × topK. |
 | `ingest.search.n_pages_multiplier` | `2` | Pages pulled pre-fusion = N × topK. |
+| `INGEST_SEARCH_DEDUP` / `ingest.search.dedup.enabled` | `true` | Collapse overlapping chunks in results. |
+| `ingest.search.dedup.headroom` | `2` | Strategy over-fetch factor feeding the deduper. |
+| `INGEST_SEARCH_DEBUG_CANDIDATES` / `ingest.search.debug-candidates` | `false` | Candidate lists + scores at INFO per search. |
 | `ingest.confidence.weight_text` | `0.4` | |
 | `ingest.confidence.weight_visual` | `0.4` | |
 | `ingest.confidence.weight_agreement` | `0.2` | |

@@ -21,9 +21,15 @@ agent ──MCP──► IngestTools.ingest_document
                   │
                   ├──► ChunkPipeline.ingestChunks
                   │       │
-                  │       ├──► TextExtractor.extractPerPage (PDFBox per-page)
-                  │       ├──► Chunker.chunkPerPage (page-tagged chunks)
-                  │       ├──► Embedder.embed (llama-server / vLLM)
+                  │       │   strategy=sliding (default)        strategy=structural
+                  │       │   ─────────────────────────         ─────────────────────────
+                  │       ├──► TextExtractor.extractPerPage  │  StructuredExtractor.extractBlocks
+                  │       │    (PDFBox per-page)             │  (Tika XHTML / PDF font heuristics)
+                  │       ├──► Chunker.chunkPerPage          │  StructuralChunker.chunkBlocks
+                  │       │    (page-tagged chunks)          │  (heading breadcrumbs; falls back
+                  │       │                                  │   to sliding per-file on failure)
+                  │       ├──► Embedder.embed (llama-server / vLLM) — embeds Chunk.embeddingText()
+                  │       ├──► QdrantClient.ensurePayloadIndexes (idempotent, every ingest)
                   │       └──► QdrantClient.upsertPoints  → <kb> collection
                   │
                   └──► ColPaliPipeline.ingestPages   (if enable_visual_index=true)
@@ -54,13 +60,20 @@ agent ──MCP──► IngestTools.search_documents (retrieval_mode arg)
                   └──────────────┬────────────────────────────────┘
                                  ▼
                           FusionStrategy.fuse  (RrfFusion or WeightedScoreFusion)
+                          returns top_k × dedup headroom hits
                                  │
+                                 ▼
+                          ResultDeduper.collapse  (drop overlapping chunks,
+                                 │                 backfill to top_k)
                                  ▼
                           ConfidenceCalculator.annotate
                                  │
                                  ▼
                           SearchResponse: fused hits + per-hit + response-level
                                           confidence + warnings + fusion_mode
+
+         (INGEST_SEARCH_DEBUG_CANDIDATES=true logs the pre-fusion candidate
+          lists and post-fusion scores at INFO — see ../eval/retrieval-eval.md)
 ```
 
 ## Pieces — Java side
@@ -73,6 +86,8 @@ agent ──MCP──► IngestTools.search_documents (retrieval_mode arg)
 | Orchestration | [qdrant-backend.md](qdrant-backend.md) | `QdrantBackend` |
 | Text pipeline | [text-extractor.md](text-extractor.md) | `TextExtractor` (Tika + PDFBox per-page) |
 | Text pipeline | [chunker.md](chunker.md) | `Chunker` (page-tagged chunks) |
+| Text pipeline | **[structured-extractor.md](structured-extractor.md)** | `StructuredExtractor` + `Block` (Tika XHTML / PDF font heuristics) |
+| Text pipeline | **[structural-chunker.md](structural-chunker.md)** | `StructuralChunker` (block packing + heading breadcrumbs) |
 | Text pipeline | [embedder.md](embedder.md) | `Embedder` (llama-server / OpenAI-compat) |
 | Visual pipeline | **[page-rasterizer.md](page-rasterizer.md)** | `PageRasterizer` (PDF → PNG) |
 | Visual pipeline | **[text-layer-probe.md](text-layer-probe.md)** | `TextLayerProbe` (text_quality 0/1/2) |
@@ -81,6 +96,7 @@ agent ──MCP──► IngestTools.search_documents (retrieval_mode arg)
 | Visual pipeline | **[colpali-pipeline.md](colpali-pipeline.md)** | `ColPaliPipeline` (orchestrator for visual ingest+search) |
 | Vector store | [qdrant-client.md](qdrant-client.md) | `QdrantClient` (collections + points + multivector + multistage) |
 | Search-side | **[fusion-engine.md](fusion-engine.md)** | `FusionEngine` + `FusionStrategy` + `RrfFusion` + `WeightedScoreFusion` + `ConfidenceCalculator` |
+| Search-side | **[result-deduper.md](result-deduper.md)** | `ResultDeduper` (collapse overlapping chunks in results) |
 | Async ingest | **[ingest-queue.md](ingest-queue.md)** | `IngestJob` + `IngestQueue` + `IngestWorker` (sync/queue routing) |
 | Open WebUI pipeline | [openwebui-backend.md](openwebui-backend.md) | `OpenWebUiBackend` + helpers |
 | Transports | [transports.md](transports.md) | `server-stdio`, `server-http` |

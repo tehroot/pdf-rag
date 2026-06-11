@@ -1,0 +1,4 @@
+[
+  {"query": "REPLACE ME — a question whose answer lives on a known page",
+   "gold_filename": "example.pdf", "gold_page": 1}
+]
