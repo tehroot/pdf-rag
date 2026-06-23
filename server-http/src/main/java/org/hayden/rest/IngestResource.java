@@ -2,13 +2,16 @@ package org.hayden.rest;
 
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
+import org.hayden.ingest.DeleteResult;
 import org.hayden.ingest.DirectoryIngestRequest;
 import org.hayden.ingest.DirectoryIngestResponse;
 import org.hayden.ingest.DirectoryIngestService;
@@ -22,8 +25,9 @@ import org.hayden.jobs.IngestQueue;
  * matching file ingested.
  *
  * <ul>
- *   <li>{@code POST /ingest/directory} — scan a directory and ingest its files.
- *   <li>{@code GET  /ingest/status/{jobId}} — poll a queued file's job.
+ *   <li>{@code POST   /ingest/directory} — scan a directory and ingest its files.
+ *   <li>{@code GET    /ingest/status/{jobId}} — poll a queued file's job.
+ *   <li>{@code DELETE /ingest/document} — remove a document by doc_id or source_path.
  * </ul>
  *
  * No auth (consistent with the MCP endpoint); relies on network isolation.
@@ -51,5 +55,20 @@ public class IngestResource {
         IngestJob job = queue.getJob(jobId)
                 .orElseThrow(() -> new NotFoundException("Unknown job_id: " + jobId));
         return JobStatusView.of(job);
+    }
+
+    /**
+     * Delete a document from a KB. Identify it by {@code doc_id}, or by
+     * {@code source_path} (the absolute path it was ingested from — resolved to
+     * the same deterministic id the directory scan assigned). Idempotent.
+     */
+    @DELETE
+    @Path("/document")
+    public DeleteResult deleteDocument(
+            @QueryParam("kb_name") String kbName,
+            @QueryParam("doc_id") String docId,
+            @QueryParam("source_path") String sourcePath,
+            @QueryParam("backend") String backend) {
+        return directoryIngest.deleteDocument(kbName, docId, sourcePath, backend);
     }
 }

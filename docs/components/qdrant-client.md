@@ -15,6 +15,7 @@ Twelve public methods covering the endpoints both pipelines need:
 | `createCollection(name, dim)` | `PUT /collections/{name}` | Single-vector collection with Cosine distance. |
 | `ensureCollection(name, dim)` | get + create | Idempotent helper; rejects dim mismatch. |
 | `deleteCollection(name)` | `DELETE /collections/{name}` | Idempotent on 404. |
+| `deleteByDocId(coll, docId)` | `POST /collections/{name}/points/delete?wait=true` | Filtered delete on the indexed `doc_id`; false on 404. Backs replace-on-reingest + document deletion. |
 | `ensurePayloadIndexes(coll, fields)` | `GET` + `PUT /collections/{name}/index?wait=true` | Diff `payload_schema`, create only missing indexes. See below. |
 | `upsertPoints(coll, points)` | `PUT /collections/{name}/points?wait=true` | Single-vector upsert. |
 | `search(coll, vec, topK, filter)` | `POST /collections/{name}/points/search` | Single-vector ANN search with optional payload filter. |

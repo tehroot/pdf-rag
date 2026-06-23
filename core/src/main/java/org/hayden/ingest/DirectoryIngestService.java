@@ -69,7 +69,7 @@ public class DirectoryIngestService {
         int queued = 0;
         int failed = 0;
         for (Path f : files) {
-            String abs = f.toAbsolutePath().normalize().toString();
+            String abs = canonicalSourcePath(f);
             String filename = f.getFileName().toString();
             String docId = UuidV5.forSource(req.kbName(), abs);
             IngestRequest ir = new IngestRequest(
@@ -101,6 +101,42 @@ public class DirectoryIngestService {
                 req.kbName(), dir, files.size(), completed, queued, failed);
         return new DirectoryIngestResponse(dir.toString(), req.kbName(),
                 files.size(), completed, queued, failed, outcomes);
+    }
+
+    /**
+     * Delete a directory-ingested document. Identify it by {@code docId}
+     * directly, or by {@code sourcePath} — the absolute path it was ingested
+     * from — which is resolved to the same deterministic id
+     * ({@link UuidV5#forSource}) the scan assigned it. Useful when a file has
+     * been removed from disk and should be dropped from the index.
+     */
+    public DeleteResult deleteDocument(String kbName, String docId,
+                                       String sourcePath, String backend) {
+        if (kbName == null || kbName.isBlank()) {
+            throw new IngestException("kb_name is required");
+        }
+        String id;
+        if (docId != null && !docId.isBlank()) {
+            id = docId;
+        } else if (sourcePath != null && !sourcePath.isBlank()) {
+            id = UuidV5.forSource(kbName, canonicalSourcePath(sourcePath));
+        } else {
+            throw new IngestException("doc_id or source_path is required");
+        }
+        return ingestService.deleteDocument(kbName, id, backend);
+    }
+
+    /**
+     * Canonical form of a source path, used both when assigning a file's
+     * deterministic doc id during a scan and when resolving a {@code source_path}
+     * back to that id for deletion — so the two always agree.
+     */
+    public static String canonicalSourcePath(Path p) {
+        return p.toAbsolutePath().normalize().toString();
+    }
+
+    public static String canonicalSourcePath(String path) {
+        return canonicalSourcePath(Path.of(path));
     }
 
     private List<Path> scan(Path root, boolean recursive, Set<String> exts) {

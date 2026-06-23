@@ -250,6 +250,25 @@ public class ColPaliPipeline {
         return out;
     }
 
+    /** Outcome of deleting a single document's pages: whether the {@code <kb>_pages}
+     *  collection existed, and how many stored page images were removed. */
+    public record DeleteDocResult(boolean pointsDeleted, int imagesRemoved) {
+    }
+
+    /**
+     * Delete a single document's pages from {@code <kb>_pages} and remove its
+     * stored page images. No-op (and leaves the image store untouched) when the
+     * KB has no visual index. Idempotent.
+     */
+    public DeleteDocResult deleteDoc(String kbName, String docId) {
+        if (kbName == null || kbName.isBlank() || docId == null || docId.isBlank()) {
+            return new DeleteDocResult(false, 0);
+        }
+        boolean pointsDeleted = qdrant.deleteByDocId(pagesCollectionName(kbName), docId);
+        int imagesRemoved = pointsDeleted ? imageStore.deleteForDoc(kbName, docId) : 0;
+        return new DeleteDocResult(pointsDeleted, imagesRemoved);
+    }
+
     /**
      * Drop the visual index for a KB: delete the {@code <kb>_pages} Qdrant
      * collection AND remove the corresponding page images from

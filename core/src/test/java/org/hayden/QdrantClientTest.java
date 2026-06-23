@@ -18,6 +18,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.equalToJson;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
+import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.put;
 import static com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
@@ -162,6 +163,27 @@ class QdrantClientTest {
         assertThatThrownBy(() -> client.ensurePayloadIndexes("docs", Map.of("doc_id", "keyword")))
                 .isInstanceOf(IngestException.class)
                 .hasMessageContaining("HTTP 500");
+    }
+
+    @Test
+    void deleteByDocId_issuesFilteredDelete() {
+        server.stubFor(post(urlPathEqualTo("/collections/docs/points/delete"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+
+        boolean existed = client.deleteByDocId("docs", "d-1");
+
+        assertThat(existed).isTrue();
+        server.verify(postRequestedFor(urlPathEqualTo("/collections/docs/points/delete"))
+                .withRequestBody(matchingJsonPath("$.filter.must[0].key", equalTo("doc_id")))
+                .withRequestBody(matchingJsonPath("$.filter.must[0].match.value", equalTo("d-1"))));
+    }
+
+    @Test
+    void deleteByDocId_returnsFalseOn404() {
+        server.stubFor(post(urlPathEqualTo("/collections/gone/points/delete"))
+                .willReturn(aResponse().withStatus(404)));
+
+        assertThat(client.deleteByDocId("gone", "d-1")).isFalse();
     }
 
     @Test

@@ -1,5 +1,7 @@
 package org.hayden.backend;
 
+import org.hayden.ingest.DeleteResult;
+import org.hayden.ingest.IngestException;
 import org.hayden.ingest.IngestRequest;
 import org.hayden.ingest.IngestResult;
 import org.hayden.ingest.SearchRequest;
@@ -30,6 +32,15 @@ public interface Backend {
     }
 
     SearchResponse search(SearchRequest req);
+
+    /**
+     * Delete a document (and all its data) from a KB. Default is unsupported —
+     * only backends that own their storage and key it by doc id (Qdrant)
+     * implement it.
+     */
+    default DeleteResult deleteDocument(String kbName, String docId) {
+        throw new IngestException("delete_document is not supported by backend '" + name() + "'");
+    }
 
     /** List knowledge-base / collection names visible to this backend. */
     List<KnowledgeBaseSummary> listKnowledgeBases();

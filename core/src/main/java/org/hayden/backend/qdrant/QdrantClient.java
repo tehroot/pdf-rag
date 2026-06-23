@@ -114,6 +114,31 @@ public class QdrantClient {
         }
     }
 
+    /**
+     * Delete every point in {@code collection} whose {@code doc_id} payload
+     * equals {@code docId}. Returns true if the collection existed (delete
+     * issued), false on 404 (nothing to do). {@code doc_id} is payload-indexed,
+     * so this is a fast filtered delete — used for replace-on-reingest and
+     * explicit document deletion.
+     */
+    public boolean deleteByDocId(String collection, String docId) {
+        Map<String, Object> body = Map.of("filter", toQdrantFilter(Map.of("doc_id", docId)));
+        HttpRequest req = builder("/collections/" + encode(collection) + "/points/delete?wait=true")
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(writeJson(body)))
+                .build();
+        HttpResponse<byte[]> resp = sendRaw(req);
+        if (resp.statusCode() == 404) {
+            return false;
+        }
+        if (resp.statusCode() / 100 != 2) {
+            throw new IngestException("Qdrant POST /collections/" + collection
+                    + "/points/delete returned HTTP " + resp.statusCode() + ": "
+                    + new String(resp.body(), StandardCharsets.UTF_8));
+        }
+        return true;
+    }
+
     public void createCollection(String name, int dim) {
         Map<String, Object> vectors = Map.of("size", dim, "distance", distance);
         Map<String, Object> body = Map.of("vectors", vectors);
