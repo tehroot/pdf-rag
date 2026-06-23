@@ -31,6 +31,15 @@ public class IngestService {
         return pick(req.backend()).ingest(req);
     }
 
+    /**
+     * Ingest with a caller-supplied document id (see
+     * {@link Backend#ingest(IngestRequest, String)}). Used by directory scans
+     * for idempotent re-ingest via a deterministic per-source-path id.
+     */
+    public IngestResult ingest(IngestRequest req, String explicitDocId) {
+        return pick(req.backend()).ingest(req, explicitDocId);
+    }
+
     public SearchResponse search(SearchRequest req) {
         return pick(req.backend()).search(req);
     }

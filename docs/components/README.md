@@ -99,6 +99,7 @@ agent ──MCP──► IngestTools.search_documents (retrieval_mode arg)
 | Search-side | **[result-deduper.md](result-deduper.md)** | `ResultDeduper` (collapse overlapping chunks in results) |
 | Async ingest | **[ingest-queue.md](ingest-queue.md)** | `IngestJob` + `IngestQueue` + `IngestWorker` (sync/queue routing) |
 | Open WebUI pipeline | [openwebui-backend.md](openwebui-backend.md) | `OpenWebUiBackend` + helpers |
+| Directory ingest (REST) | **[directory-ingest.md](directory-ingest.md)** | `DirectoryIngestService` + `IngestResource` (`POST /ingest/directory`) |
 | Transports | [transports.md](transports.md) | `server-stdio`, `server-http` |
 
 **Bolded entries are new in the fusion design.** The others have been updated

@@ -68,8 +68,17 @@ public class QdrantBackend implements Backend {
 
     @Override
     public IngestResult ingest(IngestRequest req) {
+        return ingest(req, null);
+    }
+
+    @Override
+    public IngestResult ingest(IngestRequest req, String explicitDocId) {
         FetchedFile file = fetch(req);
-        String docId = UUID.randomUUID().toString();
+        // Caller-supplied id (directory scans use a deterministic one keyed on
+        // the source path, for idempotent re-ingest); otherwise a fresh random.
+        String docId = (explicitDocId == null || explicitDocId.isBlank())
+                ? UUID.randomUUID().toString()
+                : explicitDocId;
 
         boolean visualRequested = resolveVisualIndexEnabled(req);
         validateModeConsistency(req.kbName(), visualRequested);

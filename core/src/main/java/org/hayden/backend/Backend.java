@@ -17,6 +17,18 @@ public interface Backend {
 
     IngestResult ingest(IngestRequest req);
 
+    /**
+     * Ingest with a caller-supplied document id. Backends that key their
+     * storage on a deterministic id (Qdrant uses UUIDv5 point ids derived from
+     * the doc id) overwrite an existing document's data in place when the same
+     * id is supplied again — this is what makes a directory re-scan idempotent.
+     * The default ignores {@code explicitDocId}, for backends with no
+     * deterministic-id concept (e.g. Open WebUI, which assigns its own file id).
+     */
+    default IngestResult ingest(IngestRequest req, String explicitDocId) {
+        return ingest(req);
+    }
+
     SearchResponse search(SearchRequest req);
 
     /** List knowledge-base / collection names visible to this backend. */
