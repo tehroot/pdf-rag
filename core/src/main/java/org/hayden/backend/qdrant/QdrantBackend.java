@@ -8,6 +8,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hayden.backend.Backend;
 import org.hayden.backend.KnowledgeBaseSummary;
 import org.hayden.backend.qdrant.fusion.FusionEngine;
+import org.hayden.ingest.DeleteResult;
 import org.hayden.ingest.FetchedFile;
 import org.hayden.ingest.FileFetcher;
 import org.hayden.ingest.IngestException;
@@ -126,6 +127,16 @@ public class QdrantBackend implements Backend {
     /** The actual ingest work. Shared by sync path and worker path. */
     IngestResult doIngest(IngestRequest req, FetchedFile file, String docId,
                           boolean visualRequested) {
+        // Replace semantics: clear any prior copy of this docId before writing.
+        // For directory re-scans (deterministic ids) this overwrites a changed
+        // file cleanly instead of leaving a stale tail of orphaned chunks; for
+        // worker retries it discards a previous partial attempt. A random docId
+        // (MCP ingest_document) matches nothing, so this is a cheap no-op there.
+        chunks.deleteDoc(req.kbName(), docId);
+        if (visualRequested) {
+            pages.deleteDoc(req.kbName(), docId);
+        }
+
         // Text ingest always runs.
         IngestResult chunkResult = chunks.ingestChunks(req, file, docId);
 
@@ -165,6 +176,29 @@ public class QdrantBackend implements Backend {
     @Override
     public SearchResponse search(SearchRequest req) {
         return fusion.search(req, NAME);
+    }
+
+    @Override
+    public DeleteResult deleteDocument(String kbName, String docId) {
+        if (kbName == null || kbName.isBlank()) {
+            throw new IngestException("kb_name is required");
+        }
+        if (docId == null || docId.isBlank()) {
+            throw new IngestException("doc_id is required");
+        }
+        boolean textDeleted = chunks.deleteDoc(kbName, docId);
+        ColPaliPipeline.DeleteDocResult visual = pages.deleteDoc(kbName, docId);
+        String message;
+        if (!textDeleted && !visual.pointsDeleted()) {
+            message = "No collection found for KB '" + kbName + "'; nothing deleted.";
+        } else {
+            message = "Deleted document " + docId + " from KB '" + kbName + "'"
+                    + (visual.pointsDeleted()
+                            ? " (" + visual.imagesRemoved() + " page image(s) removed)" : "")
+                    + ".";
+        }
+        return new DeleteResult(NAME, kbName, docId, textDeleted,
+                visual.pointsDeleted(), visual.imagesRemoved(), message);
     }
 
     @Override

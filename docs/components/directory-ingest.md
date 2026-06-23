@@ -18,8 +18,9 @@ core beans are injected into the resource via the existing Jandex index.
 ## Endpoints
 
 ```
-POST /ingest/directory      scan a directory, ingest matching files
-GET  /ingest/status/{jobId} poll a queued file's job
+POST   /ingest/directory      scan a directory, ingest matching files
+GET    /ingest/status/{jobId}  poll a queued file's job
+DELETE /ingest/document        remove a document (by doc_id or source_path)
 ```
 
 No auth (consistent with `/mcp`); relies on network isolation. JSON is
@@ -81,6 +82,32 @@ queue), poll their job. Returns a compact view of the persisted `IngestJob`
 unknown id → `404`. Equivalent to the `get_ingest_status` MCP tool, for
 REST-only callers.
 
+### `DELETE /ingest/document`
+
+Remove a document and all its data from a KB — text chunks, and (if present)
+its ColPali page vectors and stored page images. Identify it by query param:
+
+```
+DELETE /ingest/document?kb_name=engineering-docs&doc_id=e9b81ae3-…
+DELETE /ingest/document?kb_name=engineering-docs&source_path=/docs/manuals/a.pdf
+```
+
+`source_path` is the operator-friendly key for the directory workflow: it's
+canonicalized and run through `UuidV5.forSource(kb, path)` — the exact id the
+scan assigned that file — so you can drop a document you just deleted from disk
+without tracking its UUID. (Only works for directory-ingested docs; MCP-ingested
+docs have random ids.) Idempotent: deleting an absent doc is a no-op. Response:
+
+```json
+{"backend": "qdrant", "kb_name": "engineering-docs", "doc_id": "e9b81ae3-…",
+ "text_points_deleted": true, "visual_points_deleted": true,
+ "images_removed": 14, "message": "Deleted document … (14 page image(s) removed)."}
+```
+
+Same capability is exposed to agents as the `delete_document` MCP tool
+(by `doc_id` only). Both route through `Backend.deleteDocument`, backed by a
+filtered Qdrant delete on the payload-indexed `doc_id`.
+
 ## How a scan runs
 
 ```mermaid
@@ -138,12 +165,13 @@ queued branches), and `IngestService.ingest(req, explicitDocId)`. The MCP
 `ingest_document` tool still uses the no-id overload → a fresh random id per
 call, unchanged.
 
-**Caveat (the known stale-tail issue):** if a file *changes* and now produces
-*fewer* chunks than before, the surplus high-index points from the previous
-version remain (different chunking config has the same effect). Overwrite is
-clean for same-or-more chunks; shrinking content leaves an orphan tail. There
-is no delete-by-source today (see `docs/eval/retrieval-eval.md` notes on
-re-ingest semantics). For a strict refresh, target a fresh KB.
+**Clean overwrite (no stale tail).** `QdrantBackend.doIngest` deletes any prior
+copy of the docId before writing — `chunks.deleteDoc` + (when visual)
+`pages.deleteDoc`, a filtered delete on the payload-indexed `doc_id`. So a
+re-scanned file that *changed* and now produces *fewer* chunks doesn't leave
+orphaned high-index points: the old version is cleared first, then the new one
+written. (For a random docId on the MCP path the delete matches nothing — a
+cheap no-op; it also discards a previous partial attempt on a worker retry.)
 
 ## Why it's like this
 
@@ -176,7 +204,14 @@ re-ingest semantics). For a strict refresh, target a fresh KB.
 - `queuedResult_isCountedAndReportsJobId`.
 - `missingKbName_throws`, `relativeDirectory_throws`,
   `nonexistentDirectory_throws`.
+- `delete_byDocId_passesIdThrough`, `delete_bySourcePath_resolvesToDeterministicDocId`
+  (id == `UuidV5.forSource(...)`), `delete_withoutDocIdOrSourcePath_throws`.
+
+Delete plumbing is covered by `QdrantClientTest` (`deleteByDocId_issuesFilteredDelete`
+asserts the `doc_id` filter body; `…_returnsFalseOn404`) and `QdrantBackendTest`
+(`ingest_issuesReplaceDeleteBeforeUpsert`, `deleteDocument_textOnlyKb_deletesChunks`,
+`deleteDocument_visualKb_deletesPagesAndImages`).
 
 The thin JAX-RS resource is verified by manual smoke test (start the jar, curl
-`POST /ingest/directory` + the 400/404 paths), in keeping with the repo's
-no-`@QuarkusTest` convention.
+`POST /ingest/directory`, `DELETE /ingest/document`, and the 400/404 paths), in
+keeping with the repo's no-`@QuarkusTest` convention.

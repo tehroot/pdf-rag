@@ -1,6 +1,7 @@
 package org.hayden;
 
 import org.hayden.backend.qdrant.UuidV5;
+import org.hayden.ingest.DeleteResult;
 import org.hayden.ingest.DirectoryFileOutcome;
 import org.hayden.ingest.DirectoryIngestRequest;
 import org.hayden.ingest.DirectoryIngestResponse;
@@ -130,6 +131,33 @@ class DirectoryIngestServiceTest {
     }
 
     @Test
+    void delete_byDocId_passesIdThrough() {
+        DeleteResult r = service.deleteDocument("docs", "explicit-id", null, null);
+
+        assertThat(stub.deletedDocId).isEqualTo("explicit-id");
+        assertThat(r.docId()).isEqualTo("explicit-id");
+    }
+
+    @Test
+    void delete_bySourcePath_resolvesToDeterministicDocId() {
+        Path abs = root.resolve("a.pdf");
+        String expected = UuidV5.forSource("docs",
+                DirectoryIngestService.canonicalSourcePath(abs.toString()));
+
+        service.deleteDocument("docs", null, abs.toString(), null);
+
+        // Same id the scan would have assigned this path.
+        assertThat(stub.deletedDocId).isEqualTo(expected);
+    }
+
+    @Test
+    void delete_withoutDocIdOrSourcePath_throws() {
+        assertThatThrownBy(() -> service.deleteDocument("docs", null, null, null))
+                .isInstanceOf(IngestException.class)
+                .hasMessageContaining("doc_id or source_path");
+    }
+
+    @Test
     void missingKbName_throws() {
         assertThatThrownBy(() -> service.ingestDirectory(new DirectoryIngestRequest(
                 root.toString(), "  ", null, null, null, null, null, null)))
@@ -178,6 +206,7 @@ class DirectoryIngestServiceTest {
         final List<IngestRequest> requests = new ArrayList<>();
         String failFor;
         String queueFor;
+        String deletedDocId;
 
         @Override
         public IngestResult ingest(IngestRequest req, String explicitDocId) {
@@ -192,6 +221,12 @@ class DirectoryIngestServiceTest {
             }
             return new IngestResult("qdrant", req.kbName(), req.kbName(), explicitDocId,
                     "completed", 3, 0, true, "ingested " + name, List.of(), null);
+        }
+
+        @Override
+        public DeleteResult deleteDocument(String kbName, String docId, String backendName) {
+            deletedDocId = docId;
+            return new DeleteResult("qdrant", kbName, docId, true, false, 0, "deleted");
         }
     }
 }

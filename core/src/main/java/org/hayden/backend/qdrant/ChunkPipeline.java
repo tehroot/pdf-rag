@@ -203,6 +203,18 @@ public class ChunkPipeline {
         return new SearchResponse(BACKEND_NAME, req.kbName(), hits);
     }
 
+    /**
+     * Delete a document's chunks from the {@code <kb>} collection. Returns true
+     * if the collection existed (delete issued). Idempotent — a docId with no
+     * points is a no-op.
+     */
+    public boolean deleteDoc(String kbName, String docId) {
+        if (kbName == null || kbName.isBlank() || docId == null || docId.isBlank()) {
+            return false;
+        }
+        return qdrant.deleteByDocId(kbName, docId);
+    }
+
     /** True if the chunks collection for {@code kbName} already exists. */
     public boolean collectionExists(String kbName) {
         if (kbName == null || kbName.isBlank()) {

@@ -1,7 +1,7 @@
 # MCP tool surface (`IngestTools`)
 
 `core/.../tools/IngestTools.java` — the only class the MCP framework
-introspects to build the tool catalogue. Seven `@Tool` methods, all
+introspects to build the tool catalogue. Eight `@Tool` methods, all
 `@Blocking`.
 
 ## Tools
@@ -11,12 +11,15 @@ introspects to build the tool catalogue. Seven `@Tool` methods, all
 | `ingest_document` | Resolve a source, find-or-create the KB, ingest. Optionally visual-indexes; may return queued status. | Qdrant or Open WebUI |
 | `search_documents` | Vector search with optional fusion. | Qdrant only |
 | `list_knowledge_bases` | List KBs / collections with visual-index status. Defaults to merging across backends. | All |
+| **`delete_document`** | Delete a document (chunks + visual pages + page images) by doc_id. Idempotent. | Qdrant |
 | `get_file_status` | Open-WebUI-only diagnostic. | Open WebUI |
 | `inspect_page` | Retrieve a rendered page image as base64 PNG (Qdrant visual index). | Qdrant |
 | **`get_ingest_status`** | Poll an async ingest job by jobId. | Qdrant (queue) |
 | **`drop_visual_index`** | Admin: delete the visual index for a KB. | Qdrant |
 
-Bold = added in Phase 5/6.
+A directory-ingested document can also be deleted over REST by its source path
+(`DELETE /ingest/document?kb_name=…&source_path=…`); see
+[directory-ingest.md](directory-ingest.md).
 
 ## `ingest_document`
 

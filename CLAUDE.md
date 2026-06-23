@@ -128,10 +128,17 @@ core/src/main/java/org/hayden/
         └── dto/
 ```
 
-`IngestTools` exposes seven `@Tool` methods, all `@Blocking`:
+`IngestTools` exposes eight `@Tool` methods, all `@Blocking`:
 `ingest_document`, `search_documents`, `list_knowledge_bases`,
-`get_file_status` (Open WebUI), `inspect_page` (Qdrant visual),
-`get_ingest_status` (async queue), `drop_visual_index` (admin).
+`delete_document` (Qdrant; by doc_id), `get_file_status` (Open WebUI),
+`inspect_page` (Qdrant visual), `get_ingest_status` (async queue),
+`drop_visual_index` (admin).
+
+`server-http` additionally exposes a plain REST surface (`org.hayden.rest.*`,
+`quarkus-rest-jackson`) for bulk/operational use: `POST /ingest/directory`,
+`GET /ingest/status/{jobId}`, `DELETE /ingest/document` (by `doc_id` or
+`source_path`). Logic is in `core` (`DirectoryIngestService`); see
+[docs/components/directory-ingest.md](docs/components/directory-ingest.md).
 
 `IngestService.ingest()` / `.search()` pick a `Backend` by `req.backend()`
 or the configured default (`ingest.backend.default`, env `INGEST_BACKEND`),
@@ -263,9 +270,12 @@ model-agnostic via `/info`.
   creates new points and the old copy's chunks remain. The **directory-ingest**
   path instead supplies a deterministic `docId = UuidV5.forSource(kb, absPath)`
   via `ingest(req, explicitDocId)`, so re-scanning a directory overwrites each
-  file's points in place (idempotent) — except the stale-tail case where a
-  changed file yields fewer chunks. Before/after chunking comparisons must use
-  fresh KBs (see docs/eval/retrieval-eval.md); no dedupe by source URL.
+  file's points in place (idempotent). `doIngest` **deletes the docId's prior
+  points before writing** (`chunks.deleteDoc` / `pages.deleteDoc`), so a changed
+  file that yields fewer chunks leaves no stale tail; on the random-docId MCP
+  path that delete matches nothing (a cheap no-op — the old copy under the
+  previous random id still remains). Before/after chunking comparisons still
+  want fresh KBs (see docs/eval/retrieval-eval.md); no dedupe by source URL.
 
 - **`<kb>_pages` is the visual-index capability flag.** Implicit state.
   `ColPaliPipeline.isEnabledFor(kbName)` calls `qdrant.getCollection(<kb>_pages)
@@ -320,6 +330,7 @@ list in [docs/architecture.md](docs/architecture.md).
 | DELETE | `/collections/{name}` | delete (idempotent on 404) |
 | PUT | `/collections/{name}/index?wait=true` | create payload index (idempotent via payload_schema diff) |
 | PUT | `/collections/{name}/points?wait=true` | upsert (single or multivector) |
+| POST | `/collections/{name}/points/delete?wait=true` | delete points by `doc_id` filter |
 | POST | `/collections/{name}/points/search` | single-vector ANN search |
 | POST | `/collections/{name}/points/query` | multistage prefetch+rerank query |
 

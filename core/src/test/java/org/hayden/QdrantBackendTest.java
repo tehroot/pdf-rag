@@ -230,6 +230,72 @@ class QdrantBackendTest {
     }
 
     @Test
+    void ingest_issuesReplaceDeleteBeforeUpsert() {
+        // doIngest deletes any prior copy of the docId before writing. The
+        // delete endpoint is unstubbed (→ 404 → no-op), but WireMock still
+        // records that the request was sent.
+        mock.stubFor(post(urlEqualTo("/v1/embeddings"))
+                .willReturn(aResponse().withStatus(200)
+                        .withBody("{\"data\":[{\"embedding\":[0.5,0.5,0.5]}]}")));
+        mock.stubFor(get(urlEqualTo("/collections/docs"))
+                .willReturn(aResponse().withStatus(404)));
+        mock.stubFor(put(urlEqualTo("/collections/docs"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+        mock.stubFor(put(urlPathEqualTo("/collections/docs/points"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+
+        String b64 = Base64.getEncoder().encodeToString("Alpha beta gamma.".getBytes());
+        backend.ingest(new IngestRequest(
+                SourceType.INLINE, b64, "n.txt", "docs", null, 0L, "qdrant", null));
+
+        mock.verify(postRequestedFor(urlPathEqualTo("/collections/docs/points/delete")));
+    }
+
+    @Test
+    void deleteDocument_textOnlyKb_deletesChunks() {
+        mock.stubFor(post(urlPathEqualTo("/collections/docs/points/delete"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+        // docs_pages/points/delete unstubbed → 404 → no visual points, no image cleanup.
+
+        var r = backend.deleteDocument("docs", "d-1");
+
+        assertThat(r.textPointsDeleted()).isTrue();
+        assertThat(r.visualPointsDeleted()).isFalse();
+        assertThat(r.imagesRemoved()).isZero();
+        mock.verify(postRequestedFor(urlPathEqualTo("/collections/docs/points/delete"))
+                .withRequestBody(com.github.tomakehurst.wiremock.client.WireMock
+                        .matchingJsonPath("$.filter.must[0].match.value",
+                                com.github.tomakehurst.wiremock.client.WireMock.equalTo("d-1"))));
+    }
+
+    @Test
+    void deleteDocument_visualKb_deletesPagesAndImages() throws Exception {
+        java.nio.file.Path tmpRoot = java.nio.file.Files.createTempDirectory("qb-del-");
+        try {
+            QdrantBackend visualBackend = newBackendWithVisual(mock.baseUrl(), tmpRoot);
+            // Seed two page images for the doc in the filesystem store.
+            ColPaliPipeline pages = (ColPaliPipeline) getField(visualBackend, "pages");
+            org.hayden.backend.qdrant.FilesystemPageImageStore store =
+                    (org.hayden.backend.qdrant.FilesystemPageImageStore) getField(pages, "imageStore");
+            store.store("v-kb", "d-9", 1, "p1".getBytes());
+            store.store("v-kb", "d-9", 2, "p2".getBytes());
+
+            mock.stubFor(post(urlPathEqualTo("/collections/v-kb/points/delete"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+            mock.stubFor(post(urlPathEqualTo("/collections/v-kb_pages/points/delete"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+
+            var r = visualBackend.deleteDocument("v-kb", "d-9");
+
+            assertThat(r.textPointsDeleted()).isTrue();
+            assertThat(r.visualPointsDeleted()).isTrue();
+            assertThat(r.imagesRemoved()).isEqualTo(2);
+        } finally {
+            deleteTree(tmpRoot);
+        }
+    }
+
+    @Test
     void search_embedsQueryThenCallsQdrantSearch() {
         mock.stubFor(post(urlEqualTo("/v1/embeddings"))
                 .willReturn(aResponse().withStatus(200)

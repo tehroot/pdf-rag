@@ -12,6 +12,7 @@ import org.hayden.backend.KnowledgeBaseSummary;
 import org.hayden.backend.openwebui.OpenWebUiBackend;
 import org.hayden.backend.openwebui.dto.ProcessStatus;
 import org.hayden.backend.qdrant.ColPaliPipeline;
+import org.hayden.ingest.DeleteResult;
 import org.hayden.ingest.DropVisualIndexResult;
 import org.hayden.ingest.IngestException;
 import org.hayden.ingest.IngestRequest;
@@ -176,6 +177,28 @@ public class IngestTools {
         return ToolResponse.success(
                 new TextContent(summary),
                 new ImageContent(result.base64Png(), "image/png"));
+    }
+
+    @Tool(name = "delete_document",
+            description = """
+                    Delete a single document and all its data from a knowledge base:
+                    its text chunks, and — if the KB has a visual index — its ColPali
+                    page vectors and stored page images. Idempotent: deleting a doc_id
+                    that isn't present is a harmless no-op. Get the doc_id from a search
+                    hit (the doc_id field) or from an ingest result (file_id). Qdrant
+                    backend only.""")
+    @Blocking
+    public DeleteResult deleteDocument(
+            @ToolArg(description = "Knowledge base / collection name.") String kb_name,
+            @ToolArg(description = "Document id to delete (from a search hit's doc_id or an ingest result's file_id).") String doc_id,
+            @ToolArg(description = "Backend override; defaults to the configured backend.", required = false) String backend) {
+        if (kb_name == null || kb_name.isBlank()) {
+            throw new IngestException("kb_name is required");
+        }
+        if (doc_id == null || doc_id.isBlank()) {
+            throw new IngestException("doc_id is required");
+        }
+        return ingestService.deleteDocument(kb_name, doc_id, backend);
     }
 
     @Tool(name = "drop_visual_index",
