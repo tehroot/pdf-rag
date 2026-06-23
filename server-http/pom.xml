@@ -23,6 +23,12 @@
             <groupId>io.quarkiverse.mcp</groupId>
             <artifactId>quarkus-mcp-server-http</artifactId>
         </dependency>
+        <!-- Plain JAX-RS REST endpoints (e.g. POST /ingest/directory) served on
+             the same Vert.x HTTP server as the MCP /mcp endpoint. -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-rest-jackson</artifactId>
+        </dependency>
     </dependencies>
 
     <build>

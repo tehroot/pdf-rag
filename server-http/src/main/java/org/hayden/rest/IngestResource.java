@@ -1,0 +1,55 @@
+package org.hayden.rest;
+
+import jakarta.inject.Inject;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.NotFoundException;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
+import org.hayden.ingest.DirectoryIngestRequest;
+import org.hayden.ingest.DirectoryIngestResponse;
+import org.hayden.ingest.DirectoryIngestService;
+import org.hayden.jobs.IngestJob;
+import org.hayden.jobs.IngestQueue;
+
+/**
+ * Plain REST surface for directory-based ingestion, served alongside the MCP
+ * {@code /mcp} endpoint on the same HTTP port. Lets non-MCP callers (cron jobs,
+ * curl, an admin UI) point the server at a directory on disk and have every
+ * matching file ingested.
+ *
+ * <ul>
+ *   <li>{@code POST /ingest/directory} — scan a directory and ingest its files.
+ *   <li>{@code GET  /ingest/status/{jobId}} — poll a queued file's job.
+ * </ul>
+ *
+ * No auth (consistent with the MCP endpoint); relies on network isolation.
+ */
+@Path("/ingest")
+@Produces(MediaType.APPLICATION_JSON)
+@Consumes(MediaType.APPLICATION_JSON)
+public class IngestResource {
+
+    @Inject
+    DirectoryIngestService directoryIngest;
+
+    @Inject
+    IngestQueue queue;
+
+    @POST
+    @Path("/directory")
+    public DirectoryIngestResponse ingestDirectory(DirectoryIngestRequest req) {
+        return directoryIngest.ingestDirectory(req);
+    }
+
+    @GET
+    @Path("/status/{jobId}")
+    public JobStatusView status(@PathParam("jobId") String jobId) {
+        IngestJob job = queue.getJob(jobId)
+                .orElseThrow(() -> new NotFoundException("Unknown job_id: " + jobId));
+        return JobStatusView.of(job);
+    }
+}

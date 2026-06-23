@@ -64,15 +64,24 @@ methods included) lives in `core` as CDI beans; each transport module is a
 near-empty shell. **To add or change a tool, edit `core` only** — both
 transports pick it up via CDI.
 
+One exception: `server-http` also hosts a plain JAX-RS REST surface
+(`server-http/src/main/java/org/hayden/rest/`, `quarkus-rest-jackson`
+dependency) for the directory-ingest endpoint, served on the same port as
+`/mcp`. The *logic* stays backend-agnostic in `core`
+(`DirectoryIngestService`); only the HTTP binding is in `server-http` (stdio
+has no REST). See [docs/components/directory-ingest.md](docs/components/directory-ingest.md).
+
 ## Architecture
 
 ```
 core/src/main/java/org/hayden/
 ├── tools/IngestTools.java              # MCP @Tool surface (7 tools)
 ├── ingest/
-│   ├── IngestService.java              # dispatcher: picks Backend by arg / default
+│   ├── IngestService.java              # dispatcher: picks Backend by arg / default; ingest(req) + ingest(req, explicitDocId)
 │   ├── IngestRequest / SearchRequest   # tool input records
 │   ├── IngestResult / SearchResponse / SearchHit / InspectPageResult / PageText / DropVisualIndexResult
+│   ├── DirectoryIngestService.java     # scan a dir → per-file ingest (REST endpoint backs onto this)
+│   ├── DirectoryIngestRequest / DirectoryIngestResponse / DirectoryFileOutcome
 │   ├── FileFetcher.java                # url / path / inline → FetchedFile (shared)
 │   └── IngestException.java
 ├── jobs/
@@ -246,14 +255,17 @@ model-agnostic via `/info`.
 - **`/api/v1/knowledge/` returns `{items, total}`**, not a bare array. Open
   WebUI's real shape drifts from its docs. `KnowledgePage` wraps it.
 
-- **Point IDs are UUID v5, deterministic — but docId is random per ingest.**
-  `UuidV5.forChunk(docId, chunkIndex)` and `UuidV5.forPage(docId, pageNumber)`
-  produce identical IDs given identical inputs, but `QdrantBackend.ingest`
-  generates a fresh `docId = UUID.randomUUID()` every call, so re-ingesting
-  the same file ALWAYS creates new points and the old copy's chunks remain.
-  The idempotent-overwrite property only applies within one docId (i.e.
-  queue-worker retries). Before/after chunking comparisons must use fresh KBs
-  (see docs/eval/retrieval-eval.md); no dedupe by source URL.
+- **Point IDs are UUID v5, deterministic — and docId is random EXCEPT for
+  directory ingest.** `UuidV5.forChunk(docId, chunkIndex)` /
+  `forPage(docId, pageNumber)` produce identical IDs given identical inputs.
+  The MCP `ingest_document` path uses `QdrantBackend.ingest(req)` → a fresh
+  `docId = UUID.randomUUID()` every call, so re-ingesting the same file ALWAYS
+  creates new points and the old copy's chunks remain. The **directory-ingest**
+  path instead supplies a deterministic `docId = UuidV5.forSource(kb, absPath)`
+  via `ingest(req, explicitDocId)`, so re-scanning a directory overwrites each
+  file's points in place (idempotent) — except the stale-tail case where a
+  changed file yields fewer chunks. Before/after chunking comparisons must use
+  fresh KBs (see docs/eval/retrieval-eval.md); no dedupe by source URL.
 
 - **`<kb>_pages` is the visual-index capability flag.** Implicit state.
   `ColPaliPipeline.isEnabledFor(kbName)` calls `qdrant.getCollection(<kb>_pages)

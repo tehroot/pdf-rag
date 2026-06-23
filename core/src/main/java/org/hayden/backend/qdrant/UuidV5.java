@@ -33,6 +33,19 @@ public final class UuidV5 {
         return compute(NAMESPACE, docId + ":page:" + pageNumber).toString();
     }
 
+    /**
+     * Deterministic document id for a file at {@code sourcePath} in KB
+     * {@code kbName}. Re-ingesting the same path into the same KB yields the
+     * same doc id (and therefore the same chunk/page point IDs via
+     * {@link #forChunk}/{@link #forPage}), so a directory re-scan overwrites a
+     * document's points in place instead of creating a duplicate copy. The KB
+     * name is part of the key so the same file ingested into two KBs gets two
+     * distinct ids.
+     */
+    public static String forSource(String kbName, String sourcePath) {
+        return compute(NAMESPACE, "source:" + kbName + ":" + sourcePath).toString();
+    }
+
     static UUID compute(UUID namespace, String name) {
         byte[] nsBytes = uuidToBytes(namespace);
         byte[] nameBytes = name.getBytes(StandardCharsets.UTF_8);

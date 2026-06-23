@@ -42,6 +42,7 @@ search them. Two backends, picked per-call or by environment default:
 | [deployment.md](deployment.md) | Building both transports, environment variables, running Qdrant + llama-server + this server locally, container/systemd patterns. |
 | [mcp-integration.md](mcp-integration.md) | Wiring this server into local LLM stacks that speak MCP: Claude Desktop, Cline / VS Code agents, Open WebUI, browser hosts. |
 | [eval/retrieval-eval.md](eval/retrieval-eval.md) | Retrieval-accuracy eval protocol: gold doc/query sets, page-level hit@K / MRR, side-by-side KB comparison (e.g. sliding vs structural chunking), candidate-log debugging. |
+| [components/directory-ingest.md](components/directory-ingest.md) | REST endpoint `POST /ingest/directory` — bulk-ingest a directory on disk (non-MCP), with idempotent re-scan via deterministic doc IDs. |
 
 ## Tool surface (what an agent sees)
 
