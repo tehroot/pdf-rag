@@ -13,9 +13,14 @@
 # Configuration: copy .env.example to .env and edit. All knobs in this file
 # come from env vars; the bare `docker compose up` works once .env is in place.
 #
-# The colpali-server image defaults to the CPU build; for GPU acceleration,
-# set COLPALI_DOCKERFILE=Dockerfile.cuda in the environment and uncomment the
-# `deploy.resources.reservations.devices` block.
+# CPU vs GPU: this base file is CPU-only (sidecar builds Dockerfile.cpu, runs
+# on `cpu`). A committed docker-compose.override.yml symlink → docker-compose.gpu.yml
+# is auto-loaded by plain `docker compose`, which flips the sidecar to the CUDA
+# build + GPU reservation — so on an NVIDIA host `docker compose up -d` is GPU
+# by default. On a CPU host that override would fail (no nvidia runtime); bypass
+# it with an explicit base file or the scripts (which pass explicit -f):
+#   docker compose -f docker-compose.yml up -d     # CPU
+#   scripts/up.sh           # CPU      scripts/up.sh --gpu     # GPU
 
 services:
   qdrant:

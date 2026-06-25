@@ -45,3 +45,7 @@ build/
 
 ### Retrieval eval (docs may be large / non-redistributable) ###
 /eval/docs/
+
+### Local ingest inbox (runtime data bind-mounted to /docs, not source) ###
+/incoming/*
+!/incoming/.gitkeep

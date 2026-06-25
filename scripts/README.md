@@ -19,7 +19,9 @@ scripts/down.sh           # stop
 ```
 
 On an NVIDIA host add `--gpu` to `up`/`build-images`/`pipeline` to use the CUDA
-sidecar image and reserve the GPU (layers `docker-compose.gpu.yml`).
+sidecar image and reserve the GPU (layers `docker-compose.gpu.yml`). The scripts
+pass explicit `-f` flags, so they ignore the committed `docker-compose.override.yml`
+symlink — `scripts/up.sh` is always CPU, `--gpu` is always GPU, regardless of it.
 
 ## Scripts
 
@@ -42,10 +44,18 @@ sidecar image and reserve the GPU (layers `docker-compose.gpu.yml`).
 ## CPU vs GPU
 
 The base `docker-compose.yml` is CPU-only (sidecar model `vidore/colsmolvlm-v0.1`,
-`float32`). The `--gpu` flag layers `docker-compose.gpu.yml` (NVIDIA device
-reservation) **and** switches the sidecar to `Dockerfile.cuda` + `cuda`/`bfloat16`
-+ `vidore/colqwen2-v1.0` — unless you've already set those in `.env`, which is
-respected. GPU needs `nvidia-container-toolkit` on the host.
+`float32`). `docker-compose.gpu.yml` flips every sidecar default to GPU
+(`Dockerfile.cuda` + `cuda`/`bfloat16` + `vidore/colqwen2-v1.0`) and adds the
+NVIDIA device reservation, with `${VAR:-...}` fallbacks so anything you've pinned
+in `.env` still wins. Two ways it gets layered:
+
+- **`--gpu` flag** (`up`/`build-images`/`pipeline`) — the explicit, opt-in path.
+- **committed `docker-compose.override.yml` symlink** → `docker-compose.gpu.yml`,
+  which plain `docker compose up` auto-loads, making GPU the default *outside*
+  the scripts. The scripts pass explicit `-f` and ignore it.
+
+GPU needs `nvidia-container-toolkit` on the host. On a CPU host, prefer the
+scripts (immune to the override) or `docker compose -f docker-compose.yml up`.
 
 ## Notes
 
