@@ -37,6 +37,7 @@ search them. Two backends, picked per-call or by environment default:
 
 | File | What it covers |
 |------|----------------|
+| [status.md](status.md) | Rolling project status: what shipped this cycle, test counts, open items + decisions, deployment state. Start here for "where are we?" |
 | [architecture.md](architecture.md) | 1-page overview: module layout, the two backend pipelines, dispatcher, gotchas. |
 | [components/](components/README.md) | Per-component deep dives — one walkthrough per core part of the application. Start here if you're working on the code. |
 | [deployment.md](deployment.md) | Building both transports, environment variables, running Qdrant + llama-server + this server locally, container/systemd patterns. |
