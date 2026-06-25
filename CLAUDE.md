@@ -42,6 +42,16 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 # Whole stack via Docker
 docker compose up -d                       # qdrant + llama-server + colpali-server + pdf-rag-http
+
+# Dev-pipeline wrappers (scripts/, see scripts/README.md) — handle .env, the
+# GPU overlay, model download, and health checks for you:
+scripts/bootstrap.sh                       # one-time: .env + embedding model + ./incoming
+scripts/up.sh [--gpu]                      # start the stack (CPU, or CUDA sidecar)
+scripts/status.sh / logs.sh / down.sh      # health probes / logs / teardown
+scripts/build-images.sh [--gpu]            # docker compose build (no local Maven needed)
+scripts/test.sh [--core|--full|--sidecar]  # run test suites
+scripts/smoke.sh                           # end-to-end wiring check against a running stack
+scripts/pipeline.sh [--gpu]                # full loop: test → build images → up → smoke
 ```
 
 Tests are plain JUnit 5 + WireMock — **not** `@QuarkusTest`. They construct

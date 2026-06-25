@@ -8,6 +8,11 @@
 > [architecture.md](architecture.md); sidecar specifics are in
 > [components/colpali-sidecar.md](components/colpali-sidecar.md). This doc itself
 > still needs a refresh pass to integrate the visual side into every section.
+>
+> **For the fastest path, use the [`scripts/`](../scripts/README.md) wrappers**
+> (`scripts/bootstrap.sh` then `scripts/up.sh [--gpu]`) — they handle `.env`, the
+> embedding-model download, the GPU overlay, and health checks. Current
+> project state lives in [status.md](status.md).
 
 How to build, configure, and run pdf-rag-ingest with the Qdrant backend (the
 default) and optionally the Open WebUI backend. There are two runnable artifacts
