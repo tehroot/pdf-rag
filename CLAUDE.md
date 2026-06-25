@@ -40,8 +40,11 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/pip install -e ".[ml]"          # add real ml deps for actual model loading
 .venv/bin/colpali-server                   # run sidecar on :8090
 
-# Whole stack via Docker
-docker compose up -d                       # qdrant + llama-server + colpali-server + pdf-rag-http
+# Whole stack via Docker. A committed docker-compose.override.yml symlink →
+# docker-compose.gpu.yml is auto-loaded, so plain compose is GPU-by-default on
+# an NVIDIA host. On a CPU host, bypass the override with an explicit base file.
+docker compose up -d                       # GPU host: qdrant + llama + colpali(cuda) + pdf-rag-http
+docker compose -f docker-compose.yml up -d # CPU host: ignores the GPU override
 
 # Dev-pipeline wrappers (scripts/, see scripts/README.md) — handle .env, the
 # GPU overlay, model download, and health checks for you:
@@ -362,8 +365,9 @@ stdout. `list_knowledge_bases` is the cheapest auth+wiring check.
 (extraction, embedding, optional visual side via sidecar, Qdrant collection
 creation, upsert).
 
-HTTP: `docker compose up -d`, then point an MCP client at
-`http://localhost:8080/mcp`.
+HTTP: `docker compose up -d` (GPU host; on a CPU host use `docker compose -f
+docker-compose.yml up -d` to skip the GPU override), then point an MCP client
+at `http://localhost:8080/mcp`.
 
 ## Component walkthroughs
 

@@ -1,24 +1,40 @@
-# GPU override for the ColPali sidecar.
+# GPU override for the ColPali sidecar — makes GPU the real default.
 #
-# Activates an NVIDIA GPU reservation on the colpali-server service. The
-# matching env vars (COLPALI_DOCKERFILE=Dockerfile.cuda, COLPALI_DEVICE=cuda,
-# COLPALI_DTYPE=bfloat16, optionally COLPALI_MODEL=vidore/colqwen2-v1.0) come
-# from .env — this file only contains the GPU reservation, which compose
-# can't express conditionally inside the main file.
+# This file is symlinked as docker-compose.override.yml (committed), which
+# Docker Compose auto-loads. So on a host with an NVIDIA GPU, a plain
+#   docker compose up -d
+# builds and runs the CUDA sidecar end to end — no .env editing required.
+#
+# It flips ALL of colpali-server's defaults to GPU values (CUDA Dockerfile,
+# device, dtype, model) AND adds the NVIDIA device reservation that compose
+# can't express conditionally in the base file. Every value uses
+# ${VAR:-gpu-default}, so an explicit shell/.env value still wins — pinning
+# COLPALI_MODEL or COLPALI_DTYPE in .env is respected; this only changes the
+# fallbacks from the base file's CPU defaults to GPU ones. (compose deep-merges
+# `build`, so base `build.context: ./sidecar` is preserved and only the
+# dockerfile is replaced.)
 #
 # Prerequisites on the host:
 #   1. NVIDIA driver visible to the OS (verify with `nvidia-smi`).
 #   2. nvidia-container-toolkit installed and the docker runtime configured
 #      (verify with `docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi`).
 #
-# Bring up the stack with this override active:
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-#
-# Or symlink so plain `docker compose up -d` picks it up automatically:
-#   ln -s docker-compose.gpu.yml docker-compose.override.yml
+# CPU hosts: a plain `docker compose up` would try to reserve an nvidia device
+# and fail. Use the scripts (`scripts/up.sh` is immune — it passes explicit
+# `-f` flags, so compose skips this override), or run compose with an explicit
+# base file to bypass the override:
+#   docker compose -f docker-compose.yml up -d              # CPU, ignores this override
+#   scripts/up.sh                                           # CPU
+#   scripts/up.sh --gpu                                     # GPU (layers this file)
 
 services:
   colpali-server:
+    build:
+      dockerfile: ${COLPALI_DOCKERFILE:-Dockerfile.cuda}
+    environment:
+      COLPALI_MODEL: ${COLPALI_MODEL:-vidore/colqwen2-v1.0}
+      COLPALI_DEVICE: ${COLPALI_DEVICE:-cuda}
+      COLPALI_DTYPE: ${COLPALI_DTYPE:-bfloat16}
     deploy:
       resources:
         reservations:
