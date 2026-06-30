@@ -48,7 +48,7 @@ confirm() {
 # Export KEY=VALUE lines from .env, but never clobber values already in the
 # environment (mirrors how docker compose treats the shell vs .env).
 load_env() {
-  local f="$ROOT/.env" line key
+  local f="$ROOT/.env" line key val
   [ -f "$f" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|'#'*) continue ;; esac
@@ -56,7 +56,14 @@ load_env() {
     key="${line%%=*}"
     case "$key" in [A-Za-z_]*) ;; *) continue ;; esac
     printenv "$key" >/dev/null 2>&1 && continue
-    export "$line"
+    val="${line#*=}"
+    # Strip a whitespace-preceded inline comment (matches docker compose's
+    # dotenv parser): a '#' that follows a space/tab begins a comment; a '#'
+    # with no leading whitespace (e.g. inside a token) is kept. %% strips from
+    # the FIRST such marker. Then trim any trailing whitespace it left behind.
+    val="${val%%[[:space:]]#*}"
+    val="${val%"${val##*[![:space:]]}"}"
+    export "$key=$val"
   done < "$f"
 }
 
