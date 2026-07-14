@@ -239,6 +239,17 @@ SearchResponse{backend, kbName, fusionMode, confidence, warnings, hits}
 Sidecar down at query time → `text_only_fallback` with warning, regardless of
 the requested mode. Ingest hard-fails the same case.
 
+### Planned: lexical (BM25/sparse) channel on the text side
+
+The text pipeline is **dense-only** today, so exact-term / rare-token queries
+retrieve poorly. A designed-but-unbuilt hybrid adds a BM25/sparse vector into
+the same `<kb>` collection and fuses dense⊕sparse inside Qdrant's Query API,
+feeding the existing text⊕visual fusion unchanged. Two plans:
+[plans/lexical-bm25-hybrid-classic-v1.md](plans/lexical-bm25-hybrid-classic-v1.md)
+(client-side BM25 + Qdrant IDF, no new infra) and
+[plans/lexical-bm25-hybrid-neu-v1.md](plans/lexical-bm25-hybrid-neu-v1.md)
+(learned sparse via the sidecar).
+
 ## Page-image storage
 
 `<kb>_pages` Qdrant payload carries only a `page_image_key` (opaque string).

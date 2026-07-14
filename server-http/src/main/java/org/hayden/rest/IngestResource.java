@@ -11,6 +11,10 @@ import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
+import org.eclipse.microprofile.openapi.annotations.Operation;
+import org.eclipse.microprofile.openapi.annotations.parameters.Parameter;
+import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
+import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 import org.hayden.ingest.DeleteResult;
 import org.hayden.ingest.DirectoryIngestRequest;
 import org.hayden.ingest.DirectoryIngestResponse;
@@ -35,6 +39,7 @@ import org.hayden.jobs.IngestQueue;
 @Path("/ingest")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
+@Tag(name = "ingest", description = "Directory-based ingestion, job status, and document deletion.")
 public class IngestResource {
 
     @Inject
@@ -45,13 +50,21 @@ public class IngestResource {
 
     @POST
     @Path("/directory")
+    @Operation(summary = "Ingest a directory",
+            description = "Scan a directory on disk and ingest every matching file. "
+                    + "Idempotent across re-scans via deterministic per-file doc IDs.")
     public DirectoryIngestResponse ingestDirectory(DirectoryIngestRequest req) {
         return directoryIngest.ingestDirectory(req);
     }
 
     @GET
     @Path("/status/{jobId}")
-    public JobStatusView status(@PathParam("jobId") String jobId) {
+    @Operation(summary = "Poll a queued ingest job",
+            description = "Return the status and result of a queued file's ingest job.")
+    @APIResponse(responseCode = "404", description = "No job exists with that job_id")
+    public JobStatusView status(
+            @Parameter(description = "The job_id returned when a file was queued for async ingest")
+            @PathParam("jobId") String jobId) {
         IngestJob job = queue.getJob(jobId)
                 .orElseThrow(() -> new NotFoundException("Unknown job_id: " + jobId));
         return JobStatusView.of(job);
@@ -64,10 +77,18 @@ public class IngestResource {
      */
     @DELETE
     @Path("/document")
+    @Operation(summary = "Delete a document",
+            description = "Remove a document from a KB by doc_id, or by source_path (the absolute "
+                    + "path it was ingested from, resolved to the same deterministic id the "
+                    + "directory scan assigned). Idempotent.")
     public DeleteResult deleteDocument(
+            @Parameter(description = "Target knowledge base / collection name")
             @QueryParam("kb_name") String kbName,
+            @Parameter(description = "Document id to delete (mutually exclusive with source_path)")
             @QueryParam("doc_id") String docId,
+            @Parameter(description = "Absolute source path the document was ingested from")
             @QueryParam("source_path") String sourcePath,
+            @Parameter(description = "Backend override; defaults to the configured INGEST_BACKEND")
             @QueryParam("backend") String backend) {
         return directoryIngest.deleteDocument(kbName, docId, sourcePath, backend);
     }

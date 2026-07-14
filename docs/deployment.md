@@ -113,6 +113,7 @@ file can be overridden by the matching uppercased `_`-separated env var.
 |---------|----------|---------|---------|
 | `PORT` | no | `8080` | Listen port. |
 | `MCP_CORS_ORIGINS` | no | `*` | CORS allow-list. Restrict for production. |
+| `SWAGGER_UI_ALWAYS_INCLUDE` | no | `true` | **Build-time.** Serve Swagger UI (`/q/swagger-ui`) on the packaged app, not just dev mode. The `/q/openapi` schema is served regardless. Set `false` at build to keep the UI dev-only. |
 
 ## Run
 
@@ -142,6 +143,20 @@ export EMBED_MODEL=bge-large-en-v1.5
 java -jar server-http/target/quarkus-app/quarkus-run.jar
 # now listens on 0.0.0.0:8080, MCP endpoint at http://localhost:8080/mcp
 ```
+
+Alongside `/mcp`, the HTTP transport serves a plain **REST surface** for
+bulk/operational use — `POST /ingest/directory`, `GET /ingest/status/{jobId}`,
+`DELETE /ingest/document` (see [components/directory-ingest.md](components/directory-ingest.md))
+— and its **OpenAPI docs**, all on the same port:
+
+- Swagger UI: `http://localhost:8080/q/swagger-ui`
+- OpenAPI schema: `http://localhost:8080/q/openapi` (append `?format=json` for JSON)
+
+Swagger UI is enabled on the built server via `SWAGGER_UI_ALWAYS_INCLUDE=true`
+(build-time). Because `MCP_CORS_ORIGINS` defaults to `*`, an always-on UI is
+reachable by anything that can reach the port — restrict at the network layer, or
+rebuild with the flag `false` to keep the UI dev-only (the raw `/q/openapi` schema
+stays available either way).
 
 Live-reload during development:
 
@@ -274,8 +289,10 @@ WantedBy=multi-user.target
 
 ## Health & observability
 
-- **Liveness/readiness**: not currently exposed. The HTTP transport returns 200
-  on its MCP endpoint once Quarkus is up; treat that as readiness.
+- **Liveness/readiness**: not currently exposed as a dedicated health endpoint.
+  The HTTP transport returns 200 on its MCP endpoint once Quarkus is up, and
+  `GET /q/openapi` → 200 is another cheap "HTTP/REST layer is up" probe; treat
+  either as readiness.
 - **Logs**: stdio routes everything to stderr; HTTP logs to stdout. Set
   `QUARKUS_LOG_LEVEL=DEBUG` for verbose troubleshooting.
 - **Wire-level tracing**: no built-in HTTP logging interceptor. If you need to

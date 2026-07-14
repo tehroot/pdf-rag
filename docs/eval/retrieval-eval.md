@@ -5,6 +5,12 @@ chunking, fusion, or search parameters. Without this, "it seems better" is
 the only signal — and chunking changes are exactly the kind that look better
 on one query and quietly regress five others.
 
+> Candidate experiments to run through this harness: the lexical hybrid plans —
+> [../plans/lexical-bm25-hybrid-classic-v1.md](../plans/lexical-bm25-hybrid-classic-v1.md)
+> (BM25) and [../plans/lexical-bm25-hybrid-neu-v1.md](../plans/lexical-bm25-hybrid-neu-v1.md)
+> (learned sparse). Both add a `use_lexical` toggle specifically so hybrid-vs-dense
+> can be A/B'd on the same KB with this protocol.
+
 ## The gold set
 
 Two fixed inputs, versioned in this repo under `eval/`:
