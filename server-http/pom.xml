@@ -29,6 +29,13 @@
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-rest-jackson</artifactId>
         </dependency>
+        <!-- OpenAPI schema (/q/openapi) + Swagger UI (/q/swagger-ui) for the REST
+             surface above. Auto-scans the JAX-RS resources; the MCP /mcp endpoint
+             is not JAX-RS so it is not (and should not be) in the schema. -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-smallrye-openapi</artifactId>
+        </dependency>
     </dependencies>
 
     <build>

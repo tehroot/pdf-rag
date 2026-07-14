@@ -126,3 +126,7 @@ If you want the executive summary instead, [../architecture.md](../architecture.
 keeps a 1-page view. To deploy, [../deployment.md](../deployment.md). To wire it
 into a client, [../mcp-integration.md](../mcp-integration.md). To understand
 the design decisions behind fusion, [../plans/colpali-fusion-v1.md](../plans/colpali-fusion-v1.md).
+For the planned lexical (BM25/sparse) + dense hybrid on the text side, see
+[../plans/lexical-bm25-hybrid-classic-v1.md](../plans/lexical-bm25-hybrid-classic-v1.md)
+(client-side BM25, no new infra) and its learned-sparse follow-on
+[../plans/lexical-bm25-hybrid-neu-v1.md](../plans/lexical-bm25-hybrid-neu-v1.md).

@@ -31,3 +31,4 @@ else
 fi
 dc build "${BUILD_ARGS[@]}" "${SERVICES[@]}"
 ok "images built"
+1

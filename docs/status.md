@@ -5,8 +5,9 @@ flight, and the open decisions. For the architecture see
 [architecture.md](architecture.md); for per-component detail see
 [components/](components/README.md).
 
-**As of:** 2026-06-24 · branch `feature/ingest-endpoint` (ahead of `main`;
-this cycle's work is committed here, pending merge).
+**As of:** 2026-07-13 · branch `feature/ingest-endpoint` (ahead of `main`,
+pending merge). The June cycle is committed here; the recent OpenAPI/Swagger
+change + doc updates are **uncommitted in the working tree**.
 
 ## Snapshot
 
@@ -27,7 +28,8 @@ driven by Qwen3 in Open WebUI. End-to-end working; retrieval accuracy "not
   `list_knowledge_bases`, `delete_document`, `inspect_page`,
   `get_ingest_status`, `drop_visual_index`, `get_file_status` (Open WebUI).
 - **REST (server-http, same port as `/mcp`):** `POST /ingest/directory`,
-  `GET /ingest/status/{jobId}`, `DELETE /ingest/document`.
+  `GET /ingest/status/{jobId}`, `DELETE /ingest/document`. OpenAPI schema at
+  `/q/openapi` + Swagger UI at `/q/swagger-ui` (`quarkus-smallrye-openapi`).
 - **Chunking strategies:** `sliding` (default) and `structural` (opt-in,
   heading-aware + breadcrumbs).
 - **Backends:** Qdrant (default), Open WebUI (legacy).
@@ -43,6 +45,29 @@ driven by Qwen3 in Open WebUI. End-to-end working; retrieval accuracy "not
 | Document deletion | `delete_document` tool + `DELETE /ingest/document` (by `doc_id` or `source_path`); `QdrantClient.deleteByDocId`. **Delete-before-upsert** in `doIngest` closes the stale-tail on re-ingest. | [directory-ingest.md](components/directory-ingest.md) |
 | Dev pipeline | `scripts/` — portable-bash wrappers for build + run (CPU/GPU via one `--gpu` flag), bootstrap, test, smoke, teardown. | [../scripts/README.md](../scripts/README.md) |
 
+## Shipped since (July 2026)
+
+- **OpenAPI / Swagger on the REST surface.** Added `quarkus-smallrye-openapi` to
+  `server-http` (only): schema at `/q/openapi`, Swagger UI at `/q/swagger-ui`,
+  always-on via `SWAGGER_UI_ALWAYS_INCLUDE=true` (build-time). `IngestResource`
+  annotated with `@Tag`/`@Operation`/`@Parameter`; MCP `/mcp` (not JAX-RS) stays
+  out of the schema. Build + runtime verified (200s). **Uncommitted** working-tree
+  change, alongside doc updates to [deployment.md](deployment.md) + `CLAUDE.md`.
+
+## Designed, not built
+
+- **Lexical (BM25/sparse) + dense hybrid on the text side.** The text pipeline is
+  dense-only, which retrieves poorly on exact terms / rare tokens. Two standalone
+  plans: [plans/lexical-bm25-hybrid-classic-v1.md](plans/lexical-bm25-hybrid-classic-v1.md)
+  (client-side BM25 + Qdrant IDF, no new infra — **recommended first**) and
+  [plans/lexical-bm25-hybrid-neu-v1.md](plans/lexical-bm25-hybrid-neu-v1.md)
+  (learned SPLADE/BM42 via the sidecar). Fuse dense+sparse **server-side in
+  Qdrant** (prefetch + RRF) so the Java text⊕visual fusion is untouched; lexical
+  is a **fresh-KB** capability (schema immutable) with a `use_lexical` per-search
+  A/B toggle wired to the eval harness. Motivated by a Weaviate gut-check →
+  Weaviate is a Qdrant peer, not a replacement; the only real gap is the
+  dense-only text side. **Design only; awaiting go-ahead.**
+
 ## Tests
 
 - Java: **242 core unit tests** (plain JUnit 5 + WireMock, no live services;
@@ -56,8 +81,14 @@ driven by Qwen3 in Open WebUI. End-to-end working; retrieval accuracy "not
   queries with `(filename, page)` answers). Then A/B `eval_sliding` vs
   `eval_structural` and decide: breadcrumb budget at 700-char chunks (cap 120
   vs raise to ~900), whether to flip the default strategy, prod cutover.
-- **`deployment.md` refresh.** Still carries a "pre-fusion" banner; needs the
-  visual side + the new REST surface + `scripts/` integrated.
+- **Implement the lexical hybrid.** Start with the Classic BM25 plan; measure
+  lift via the eval harness + `use_lexical` before defaulting it on. See
+  [plans/lexical-bm25-hybrid-classic-v1.md](plans/lexical-bm25-hybrid-classic-v1.md).
+- **Commit the working-tree changes.** OpenAPI/Swagger + doc/plan updates are
+  unstaged. (Note: `scripts/build-images.sh` is also modified but not by this
+  work — confirm before staging.)
+- **`deployment.md` refresh.** REST surface + OpenAPI now documented; still
+  carries a "pre-fusion" banner and needs the visual side + `scripts/` integrated.
 - **SmallRye `Optional<String>` refactor.** Replace the single-space api-key
   default workaround in compose (the long-standing cleanup).
 - **CI.** No `.github/workflows`; consider wiring `scripts/test.sh --all`.

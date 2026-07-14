@@ -328,6 +328,7 @@ Env vars (consumed via `@ConfigProperty`, see
 | `OPEN_WEBUI_API_KEY` | (legacy) Bearer token | *(empty)* |
 | `PORT` | server-http port | `8080` |
 | `MCP_CORS_ORIGINS` | CORS allow-list (Streamable HTTP) | `*` |
+| `SWAGGER_UI_ALWAYS_INCLUDE` | serve Swagger UI on the built server-http, not just dev (build-time; `/q/openapi` schema is always served) | `true` |
 
 Many more tunables (poll backoffs, fusion weights, confidence thresholds,
 text_quality thresholds, etc.) are `ingest.*` keys in the same file. Full
@@ -367,7 +368,10 @@ creation, upsert).
 
 HTTP: `docker compose up -d` (GPU host; on a CPU host use `docker compose -f
 docker-compose.yml up -d` to skip the GPU override), then point an MCP client
-at `http://localhost:8080/mcp`.
+at `http://localhost:8080/mcp`. The same port also serves the REST surface
+(`/ingest/*`) and its OpenAPI docs — Swagger UI at
+`http://localhost:8080/q/swagger-ui`, schema at `http://localhost:8080/q/openapi`
+— which double as a quick "is the REST layer up?" check.
 
 ## Component walkthroughs
 
