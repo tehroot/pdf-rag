@@ -29,6 +29,8 @@
 
         <quarkus-mcp-server.version>1.12.0</quarkus-mcp-server.version>
         <tika.version>3.0.0</tika.version>
+        <!-- Match the jai-imageio-core version Tika brings in transitively. -->
+        <jai-imageio-jpeg2000.version>1.4.0</jai-imageio-jpeg2000.version>
         <wiremock.version>3.9.2</wiremock.version>
         <assertj.version>3.26.3</assertj.version>
 
@@ -74,6 +76,11 @@
                 <groupId>org.apache.tika</groupId>
                 <artifactId>tika-parsers-standard-package</artifactId>
                 <version>${tika.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.github.jai-imageio</groupId>
+                <artifactId>jai-imageio-jpeg2000</artifactId>
+                <version>${jai-imageio-jpeg2000.version}</version>
             </dependency>
 
             <dependency>

@@ -50,6 +50,15 @@
                 </exclusion>
             </exclusions>
         </dependency>
+        <!-- ImageIO SPI plugin so PDFBox can decode JPEG2000 (JPX) images when
+             rasterizing pages. Tika already pulls in jai-imageio-core and the
+             JBIG2 reader; the JPEG2000 reader is packaged separately (JJ2000
+             license keeps it out of Apache distributions). Without it,
+             PageRasterizer throws MissingImageReaderException on such PDFs. -->
+        <dependency>
+            <groupId>com.github.jai-imageio</groupId>
+            <artifactId>jai-imageio-jpeg2000</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>io.quarkus</groupId>
