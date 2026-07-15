@@ -66,3 +66,6 @@ scripts (immune to the override) or `docker compose -f docker-compose.yml up`.
   multi-stage Maven build, so `build-images.sh` does **not** require local Maven.
 - `.env` is gitignored; only `.env.example` is committed. `bootstrap.sh` creates
   `.env` from it and won't overwrite an existing one.
+- `pdf-rag-http` sees two host dirs (read-only): the `./incoming` inbox at
+  `/docs` (`INGEST_INBOX`) and `$HOME` at `/host` (`INGEST_HOST_ROOT`; set to
+  `/` on Linux to expose the whole host FS to `POST /ingest/directory`).

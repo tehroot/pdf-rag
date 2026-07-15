@@ -164,6 +164,14 @@ services:
       # rejects server-side fetches — scp/cp the file in, then say "ingest
       # /docs/<filename>.pdf" in the chat.
       - ${INGEST_INBOX:-./incoming}:/docs:ro
+      # Broad host access for the REST directory-ingest surface: host paths
+      # under $INGEST_HOST_ROOT appear inside the container at /host, so
+      # POST /ingest/directory takes "directory": "/host/<path>". Defaults to
+      # the invoking user's $HOME; set INGEST_HOST_ROOT=/ in .env to expose
+      # the entire host filesystem (Linux only — macOS Docker Desktop doesn't
+      # file-share "/"). Read-only, but remember the REST surface has no auth:
+      # anything mounted here is indexable+searchable by whoever reaches :8080.
+      - ${INGEST_HOST_ROOT:-${HOME}}:/host:ro
     restart: unless-stopped
 
 volumes:

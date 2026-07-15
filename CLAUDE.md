@@ -152,6 +152,10 @@ core/src/main/java/org/hayden/
 `GET /ingest/status/{jobId}`, `DELETE /ingest/document` (by `doc_id` or
 `source_path`). Logic is in `core` (`DirectoryIngestService`); see
 [docs/components/directory-ingest.md](docs/components/directory-ingest.md).
+In the Docker deployment, paths in `POST /ingest/directory` resolve *inside
+the container*: the `./incoming` inbox is at `/docs` (`INGEST_INBOX`) and the
+host's `$HOME` at `/host` (`INGEST_HOST_ROOT`, compose-level var — set `/` on
+Linux for the whole host FS), both read-only.
 
 `IngestService.ingest()` / `.search()` pick a `Backend` by `req.backend()`
 or the configured default (`ingest.backend.default`, env `INGEST_BACKEND`),
