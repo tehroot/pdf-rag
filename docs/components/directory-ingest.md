@@ -97,7 +97,13 @@ can reach the port; the mount is `:ro` but that doesn't stop
 exfiltration-via-search. (2) doc IDs derive from the container path, so the
 same file ingested once as `/docs/x.pdf` and once as
 `/host/…/incoming/x.pdf` gets **two different doc IDs** (a duplicate doc) —
-pick one prefix per file and stick with it.
+pick one prefix per file and stick with it. (3) Docker bind mounts default to
+`rprivate` propagation: an NFS/SMB share (re)mounted on the host *after* the
+container was created shows up under `/host` as an empty directory. On Linux,
+set `INGEST_HOST_MOUNT_OPTS=ro,rslave` so such mounts propagate live; on
+macOS (which rejects `rslave`) recreate the container after mounting. Also
+note the container runs as root, so NFS exports with `root_squash` may be
+readable by host users but *not* by the container.
 
 ### `GET /ingest/status/{jobId}`
 

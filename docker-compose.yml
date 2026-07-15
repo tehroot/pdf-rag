@@ -33,6 +33,13 @@ services:
       - "${QDRANT_GRPC_PORT:-6334}:6334"   # gRPC (unused by us; exposed for tooling)
     volumes:
       - qdrant-data:/qdrant/storage
+    # Bulk ingests fan RocksDB out across many segment files; the docker
+    # default nofile limit (often 1024 soft) dies with "too many open files"
+    # mid-upsert. 65536 is comfortable headroom for large KBs.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     restart: unless-stopped
     healthcheck:
       # The qdrant image is debian-slim without wget; use a TCP probe via the
@@ -171,7 +178,11 @@ services:
       # the entire host filesystem (Linux only — macOS Docker Desktop doesn't
       # file-share "/"). Read-only, but remember the REST surface has no auth:
       # anything mounted here is indexable+searchable by whoever reaches :8080.
-      - ${INGEST_HOST_ROOT:-${HOME}}:/host:ro
+      # On Linux, set INGEST_HOST_MOUNT_OPTS=ro,rslave so NFS/SMB shares
+      # (re)mounted on the host AFTER container creation stay visible; the
+      # rprivate default freezes the mount table at creation time. (rslave
+      # can't be the default here — macOS Docker Desktop rejects it.)
+      - ${INGEST_HOST_ROOT:-${HOME}}:/host:${INGEST_HOST_MOUNT_OPTS:-ro}
     restart: unless-stopped
 
 volumes:
