@@ -74,6 +74,31 @@ non-absolute or non-existent `directory`) → `400 {"error": "…"}` via
 `IngestExceptionMapper`. A failure on one *file* never aborts the scan — it
 becomes an `"error"` outcome.
 
+**The path is resolved inside the server's filesystem.** `directory` is
+validated with a plain `Files.isDirectory()` in the server process — in the
+Docker deployment that means *inside the container*, where only two host
+locations are visible (both read-only bind mounts in `docker-compose.yml`):
+
+| Container path | Host path | Purpose |
+|---|---|---|
+| `/docs` | `${INGEST_INBOX:-./incoming}` | curated inbox (also `source_type=path` MCP ingest) |
+| `/host` | `${INGEST_HOST_ROOT:-$HOME}` | broad host access for this endpoint |
+
+So to ingest an arbitrary host directory, prefix it: host
+`$HOME/projects/manuals` → payload `"directory": "/host/projects/manuals"`.
+Set `INGEST_HOST_ROOT=/` in `.env` to expose the entire host filesystem
+(`/host/etc`, `/host/home/…`; Linux only — macOS Docker Desktop won't
+file-share `/`). Any other host path fails with
+`Not a directory (or does not exist)`.
+
+Two caveats: (1) the REST surface has no auth, so everything under
+`INGEST_HOST_ROOT` becomes indexable — and then *searchable* — by anyone who
+can reach the port; the mount is `:ro` but that doesn't stop
+exfiltration-via-search. (2) doc IDs derive from the container path, so the
+same file ingested once as `/docs/x.pdf` and once as
+`/host/…/incoming/x.pdf` gets **two different doc IDs** (a duplicate doc) —
+pick one prefix per file and stick with it.
+
 ### `GET /ingest/status/{jobId}`
 
 For files that came back `"queued"` (large visual PDFs auto-routed to the async
@@ -186,8 +211,9 @@ cheap no-op; it also discards a previous partial attempt on a worker retry.)
   directory of hundreds of text files will block until done. If true
   fire-and-forget is needed, a batch-job wrapper is the follow-up.
 - **No sandbox.** Any absolute path the process can read is allowed (a
-  deliberate choice — see the design decision log). The natural deployment
-  pattern is still the `/docs` bind-mount inbox; nothing forces it.
+  deliberate choice — see the design decision log). What the process *can*
+  read is bounded by the container's mounts: the `/docs` inbox plus the
+  `/host` broad mount (`INGEST_HOST_ROOT`, see above); nothing forces either.
 
 ## Tests
 
