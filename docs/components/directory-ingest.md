@@ -18,10 +18,22 @@ core beans are injected into the resource via the existing Jandex index.
 ## Endpoints
 
 ```
-POST   /ingest/directory      scan a directory, ingest matching files
+POST   /ingest/directory       scan a directory, ingest matching files
 GET    /ingest/status/{jobId}  poll a queued file's job
+GET    /ingest/jobs            list jobs, newest first (?status=queued|in_progress|completed|failed)
 DELETE /ingest/document        remove a document (by doc_id or source_path)
+
+GET    /kb                     list KBs: stats, per-KB document_count, total_documents roll-up
+GET    /kb/{name}              one KB's status (404 if absent; ?backend= to scope)
 ```
+
+`GET /ingest/jobs` returns `{total, pending, returned, jobs:[...]}` — total and
+pending describe the whole queue regardless of filter. Each job row carries
+`kind` (`visual`/`full`), `kb_name`, `filename`, and `submitted_at` alongside
+the fields the single-job status endpoint returns. Document counts on `/kb`
+are distinct `doc_id` counts via Qdrant's facet API on the payload-indexed
+`doc_id` field (accurate to 10k docs per KB, then saturates; null for
+backends that can't report one).
 
 No auth (consistent with `/mcp`); relies on network isolation. JSON is
 snake_case to match the MCP tool surface.

@@ -113,6 +113,15 @@ public class IngestQueue {
         return List.copyOf(jobs.values());
     }
 
+    /** Jobs filtered by status (null → all), most recently submitted first. */
+    public List<IngestJob> listJobs(JobStatus status) {
+        return jobs.values().stream()
+                .filter(j -> status == null || j.status() == status)
+                .sorted(java.util.Comparator.comparing(IngestJob::submittedAt,
+                        java.util.Comparator.nullsLast(java.util.Comparator.reverseOrder())))
+                .toList();
+    }
+
     public void markCompleted(String jobId, IngestResult result) {
         update(jobId, job -> job.withCompleted(Instant.now(), result));
     }

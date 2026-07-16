@@ -7,6 +7,7 @@ import org.hayden.ingest.IngestRequest.SourceType;
 import org.hayden.ingest.IngestResult;
 import org.hayden.jobs.IngestJob;
 import org.hayden.jobs.IngestQueue;
+import org.hayden.jobs.JobKind;
 import org.hayden.jobs.JobStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -214,7 +215,8 @@ class IngestQueueTest {
         IngestJob hot = queue.getJob(job.jobId()).orElseThrow();
         IngestJob bumped = new IngestJob(hot.jobId(), JobStatus.IN_PROGRESS,
                 hot.request(), hot.docId(), hot.submittedAt(), hot.startedAt(),
-                hot.completedAt(), hot.result(), hot.error(), hot.warnings(), 3);
+                hot.completedAt(), hot.result(), hot.error(), hot.warnings(), 3,
+                hot.kind());
         Files.write(tmpRoot.resolve(bumped.jobId() + ".json"),
                 jacksonMapper().writeValueAsBytes(bumped));
 
@@ -223,6 +225,40 @@ class IngestQueueTest {
         assertThat(recovered.status()).isEqualTo(JobStatus.FAILED);
         assertThat(recovered.error()).contains("retry cap (3)");
         assertThat(restarted.pendingCount()).isZero();
+    }
+
+    @Test
+    void listJobs_filtersByStatus_newestFirst() throws Exception {
+        IngestJob first = queue.submit(IngestJob.queued(sampleRequest("kb"), "doc-1"));
+        Thread.sleep(5);   // distinct submittedAt for a stable sort assertion
+        IngestJob second = queue.submit(IngestJob.queued(sampleRequest("kb"), "doc-2"));
+        queue.take(100, TimeUnit.MILLISECONDS);   // first → IN_PROGRESS (FIFO)
+
+        List<IngestJob> queuedOnly = queue.listJobs(JobStatus.QUEUED);
+        assertThat(queuedOnly).extracting(IngestJob::jobId)
+                .containsExactly(second.jobId());
+
+        List<IngestJob> all = queue.listJobs(null);
+        assertThat(all).extracting(IngestJob::jobId)
+                .containsExactly(second.jobId(), first.jobId());   // newest first
+    }
+
+    @Test
+    void jobKind_persistsAcrossRestart_andLegacyNullReadsAsFull() throws Exception {
+        IngestJob visual = queue.submit(IngestJob.queuedVisual(sampleRequest("kb"), "doc-v"));
+
+        // A job persisted before the kind field existed (kind == null on disk).
+        IngestJob legacy = new IngestJob("legacy-1", JobStatus.QUEUED,
+                sampleRequest("kb"), "doc-l", java.time.Instant.now(),
+                null, null, null, null, List.of(), 0, null);
+        Files.write(tmpRoot.resolve(legacy.jobId() + ".json"),
+                jacksonMapper().writeValueAsBytes(legacy));
+
+        IngestQueue restarted = newQueue(tmpRoot.toString(), 3);
+        assertThat(restarted.getJob(visual.jobId()).orElseThrow().effectiveKind())
+                .isEqualTo(JobKind.VISUAL);
+        assertThat(restarted.getJob(legacy.jobId()).orElseThrow().effectiveKind())
+                .isEqualTo(JobKind.FULL);
     }
 
     // ---- helpers ------------------------------------------------------------

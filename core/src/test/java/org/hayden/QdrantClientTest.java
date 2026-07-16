@@ -187,6 +187,33 @@ class QdrantClientTest {
     }
 
     @Test
+    void countDocuments_facetsOnDocId_andCountsDistinctHits() {
+        server.stubFor(post(urlPathEqualTo("/collections/docs/facet"))
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":{"hits":[
+                          {"value":"doc-a","count":47},
+                          {"value":"doc-b","count":12},
+                          {"value":"doc-c","count":3}
+                        ]}}""")));
+
+        assertThat(client.countDocuments("docs")).isEqualTo(3L);
+        server.verify(postRequestedFor(urlPathEqualTo("/collections/docs/facet"))
+                .withRequestBody(matchingJsonPath("$.key", equalTo("doc_id")))
+                .withRequestBody(matchingJsonPath("$.exact", equalTo("true"))));
+    }
+
+    @Test
+    void countDocuments_returnsNullOn404_andZeroOnEmpty() {
+        server.stubFor(post(urlPathEqualTo("/collections/gone/facet"))
+                .willReturn(aResponse().withStatus(404)));
+        server.stubFor(post(urlPathEqualTo("/collections/empty/facet"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":{\"hits\":[]}}")));
+
+        assertThat(client.countDocuments("gone")).isNull();
+        assertThat(client.countDocuments("empty")).isZero();
+    }
+
+    @Test
     void ensureCollection_createsWhenMissing() {
         server.stubFor(get(urlEqualTo("/collections/new"))
                 .willReturn(aResponse().withStatus(404)));

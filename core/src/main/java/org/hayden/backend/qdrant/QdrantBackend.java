@@ -18,6 +18,7 @@ import org.hayden.ingest.SearchRequest;
 import org.hayden.ingest.SearchResponse;
 import org.hayden.jobs.IngestJob;
 import org.hayden.jobs.IngestQueue;
+import org.hayden.jobs.JobKind;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -30,11 +31,14 @@ import java.util.UUID;
  * delegates the page-side work to {@link ColPaliPipeline}. Both pipelines
  * share a doc id so chunks and pages join cleanly at fusion time.
  *
- * <p>Sync vs queued routing: ingest calls for large PDFs (page count above
- * {@code ingest.queue.sync_threshold_pages}, default 20) get queued for
- * background processing. The {@link org.hayden.jobs.IngestWorker} picks
- * them up and calls back into {@link #ingestForWorker(IngestJob)}. Smaller
- * files run synchronously so the agent gets results immediately.
+ * <p>Sync vs queued routing: the text side always runs synchronously (the
+ * caller gets a chunk count and the doc is text-searchable immediately). For
+ * large visual PDFs (page count at or above
+ * {@code ingest.queue.sync_threshold_pages}, default 20) only the GPU-bound
+ * visual side is queued, as a {@link JobKind#VISUAL} job; the
+ * {@link org.hayden.jobs.IngestWorker} picks it up and calls back into
+ * {@link #ingestForWorker(IngestJob)}. Chunks and pages need no ingest-time
+ * link — they join at search time via the shared docId.
  */
 @ApplicationScoped
 public class QdrantBackend implements Backend {
@@ -94,26 +98,43 @@ public class QdrantBackend implements Backend {
                             + "enable_visual_index=false to skip the visual side.");
         }
 
-        // Async routing: big PDFs that will take minutes to embed go to the queue
-        // so the agent isn't blocked. Everything else runs synchronously.
+        // Async routing: big PDFs whose VLM embedding will take minutes get
+        // their visual side queued. The text side still runs synchronously —
+        // it's seconds of work, the caller gets a real chunk count, and the
+        // doc is text-searchable immediately. The queue is thereby a pure
+        // VLM lane: back-to-back GPU work, no Tika/bge gaps between jobs.
         if (shouldQueue(file, visualRequested)) {
-            IngestJob job = IngestJob.queued(req, docId);
+            // Create <kb>_pages BEFORE anything lands: its existence is the
+            // KB's visual-capability flag, and mode validation on the next
+            // ingest into this KB would otherwise reject "chunks exist but
+            // no visual index" while the job drains.
+            pages.ensureCollectionFor(req.kbName());
+
+            chunks.deleteDoc(req.kbName(), docId);
+            IngestResult chunkResult = chunks.ingestChunks(req, file, docId);
+
+            IngestJob job = IngestJob.queuedVisual(req, docId);
             queue.submit(job);
-            return IngestResult.queued(NAME, req.kbName(), docId, job.jobId());
+            return IngestResult.queuedVisual(NAME, req.kbName(), docId,
+                    job.jobId(), chunkResult.chunkCount());
         }
 
         return doIngest(req, file, docId, visualRequested);
     }
 
     /**
-     * Worker entry point: re-fetch the file from the persisted request,
-     * re-validate mode consistency (the KB's state may have changed between
-     * submit and worker pickup), and run the actual ingest. Used by
-     * {@link org.hayden.jobs.IngestWorker}.
+     * Worker entry point: re-fetch the file from the persisted request and run
+     * the job's work. VISUAL jobs (the normal case since the split — text ran
+     * at submit) run only the page pipeline; legacy FULL jobs (persisted
+     * before an upgrade) re-validate mode consistency and run both pipelines
+     * as before. Used by {@link org.hayden.jobs.IngestWorker}.
      */
     public IngestResult ingestForWorker(IngestJob job) {
         IngestRequest req = job.request();
         FetchedFile file = fetch(req);
+        if (job.effectiveKind() == JobKind.VISUAL) {
+            return doVisualIngest(req, file, job.docId());
+        }
         boolean visualRequested = resolveVisualIndexEnabled(req);
         validateModeConsistency(req.kbName(), visualRequested);
         if (visualRequested && !pages.sidecarHealthy()) {
@@ -122,6 +143,35 @@ public class QdrantBackend implements Backend {
                             + "' but the ColPali sidecar is unreachable.");
         }
         return doIngest(req, file, job.docId(), visualRequested);
+    }
+
+    /**
+     * Visual side only — the text side already ran synchronously at submit.
+     * Mode consistency was validated at submit too, and <kb>_pages was created
+     * eagerly there, so no re-validation: this KB being visual is a given.
+     */
+    private IngestResult doVisualIngest(IngestRequest req, FetchedFile file, String docId) {
+        if (!pages.sidecarHealthy()) {
+            throw new IngestException(
+                    "Visual job for KB '" + req.kbName()
+                            + "' but the ColPali sidecar is unreachable.");
+        }
+        // Replace semantics for retries: discard a previous partial attempt.
+        pages.deleteDoc(req.kbName(), docId);
+        ColPaliPipeline.PagesIngestResult pagesResult = pages.ingestPages(req, file, docId);
+        return new IngestResult(
+                NAME,
+                req.kbName(),
+                req.kbName(),
+                docId,
+                "completed",
+                0,
+                pagesResult.pageCount(),
+                true,
+                pagesResult.pageCount() + " pages visual-indexed "
+                        + "(text chunks were ingested at submit time)",
+                List.of(),
+                null);
     }
 
     /** The actual ingest work. Shared by sync path and worker path. */
@@ -199,6 +249,11 @@ public class QdrantBackend implements Backend {
         }
         return new DeleteResult(NAME, kbName, docId, textDeleted,
                 visual.pointsDeleted(), visual.imagesRemoved(), message);
+    }
+
+    @Override
+    public Long documentCount(String kbName) {
+        return chunks.countDocuments(kbName);
     }
 
     @Override

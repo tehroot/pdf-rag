@@ -46,4 +46,27 @@ public record IngestResult(
                 List.of(),
                 jobId);
     }
+
+    /**
+     * "Queued" result for the split visual flow: text chunks were ingested
+     * synchronously at submit (searchable immediately); only the visual side
+     * is pending behind the job id.
+     */
+    public static IngestResult queuedVisual(String backend, String kbName, String docId,
+                                            String jobId, int chunkCount) {
+        return new IngestResult(
+                backend,
+                kbName,
+                kbName,
+                docId,
+                "queued",
+                chunkCount,
+                0,
+                true,
+                "Text ingested (" + chunkCount + " chunks; searchable now); "
+                        + "visual indexing queued as job " + jobId
+                        + " — poll get_ingest_status to track progress",
+                List.of(),
+                jobId);
+    }
 }
