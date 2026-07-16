@@ -44,4 +44,12 @@ public interface Backend {
 
     /** List knowledge-base / collection names visible to this backend. */
     List<KnowledgeBaseSummary> listKnowledgeBases();
+
+    /**
+     * Distinct-document count for a KB, or null when the backend can't
+     * report it (or the KB doesn't exist). Default: unsupported.
+     */
+    default Long documentCount(String kbName) {
+        return null;
+    }
 }

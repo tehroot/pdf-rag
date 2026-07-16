@@ -19,8 +19,12 @@ import org.hayden.ingest.DeleteResult;
 import org.hayden.ingest.DirectoryIngestRequest;
 import org.hayden.ingest.DirectoryIngestResponse;
 import org.hayden.ingest.DirectoryIngestService;
+import org.hayden.ingest.IngestException;
 import org.hayden.jobs.IngestJob;
 import org.hayden.jobs.IngestQueue;
+import org.hayden.jobs.JobStatus;
+
+import java.util.List;
 
 /**
  * Plain REST surface for directory-based ingestion, served alongside the MCP
@@ -31,8 +35,11 @@ import org.hayden.jobs.IngestQueue;
  * <ul>
  *   <li>{@code POST   /ingest/directory} — scan a directory and ingest its files.
  *   <li>{@code GET    /ingest/status/{jobId}} — poll a queued file's job.
+ *   <li>{@code GET    /ingest/jobs} — list jobs, optionally filtered by status.
  *   <li>{@code DELETE /ingest/document} — remove a document by doc_id or source_path.
  * </ul>
+ *
+ * <p>KB-level status lives on its own resource: {@link KnowledgeBaseResource}.
  *
  * No auth (consistent with the MCP endpoint); relies on network isolation.
  */
@@ -68,6 +75,30 @@ public class IngestResource {
         IngestJob job = queue.getJob(jobId)
                 .orElseThrow(() -> new NotFoundException("Unknown job_id: " + jobId));
         return JobStatusView.of(job);
+    }
+
+    @GET
+    @Path("/jobs")
+    @Operation(summary = "List ingest jobs",
+            description = "All jobs in the queue, most recently submitted first. "
+                    + "Optionally filter by status: queued, in_progress, completed, failed.")
+    @APIResponse(responseCode = "400", description = "Unknown status value")
+    public JobsListView listJobs(
+            @Parameter(description = "Optional status filter: queued, in_progress, completed, or failed")
+            @QueryParam("status") String status) {
+        JobStatus filter = null;
+        if (status != null && !status.isBlank()) {
+            try {
+                filter = JobStatus.valueOf(status.trim().toUpperCase(java.util.Locale.ROOT));
+            } catch (IllegalArgumentException e) {
+                throw new IngestException("Unknown status '" + status
+                        + "' (valid: queued, in_progress, completed, failed)");
+            }
+        }
+        List<JobStatusView> views = queue.listJobs(filter).stream()
+                .map(JobStatusView::of)
+                .toList();
+        return new JobsListView(queue.totalCount(), queue.pendingCount(), views.size(), views);
     }
 
     /**

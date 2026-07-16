@@ -70,6 +70,45 @@ public class IngestService {
         return pick(backendName).listKnowledgeBases();
     }
 
+    /**
+     * KB listing enriched with per-KB distinct-document counts, for the REST
+     * status surface ({@code GET /kb}). Count failures degrade to null per KB
+     * rather than failing the listing.
+     */
+    public KnowledgeBaseListResponse listKnowledgeBaseStatuses(String backendName) {
+        List<KnowledgeBaseSummary> summaries = listKnowledgeBases(backendName);
+        List<KnowledgeBaseStatus> out = new ArrayList<>(summaries.size());
+        long totalDocuments = 0;
+        for (KnowledgeBaseSummary s : summaries) {
+            Long docs = safeDocumentCount(s);
+            if (docs != null) {
+                totalDocuments += docs;
+            }
+            out.add(KnowledgeBaseStatus.of(s, docs));
+        }
+        return new KnowledgeBaseListResponse(out.size(), totalDocuments, out);
+    }
+
+    /** One KB's status ({@code GET /kb/{name}}), or null if it doesn't exist. */
+    public KnowledgeBaseStatus knowledgeBaseStatus(String backendName, String kbName) {
+        for (KnowledgeBaseSummary s : listKnowledgeBases(backendName)) {
+            if (s.name().equals(kbName)) {
+                return KnowledgeBaseStatus.of(s, safeDocumentCount(s));
+            }
+        }
+        return null;
+    }
+
+    private Long safeDocumentCount(KnowledgeBaseSummary s) {
+        try {
+            return pick(s.backend()).documentCount(s.name());
+        } catch (Exception e) {
+            LOG.warnf("document count failed for kb=%s backend=%s: %s",
+                    s.name(), s.backend(), e.getMessage());
+            return null;
+        }
+    }
+
     Backend pick(String requested) {
         String wanted = (requested == null || requested.isBlank()) ? defaultBackend : requested;
         for (Backend b : backends) {

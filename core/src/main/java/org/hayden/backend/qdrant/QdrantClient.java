@@ -139,6 +139,44 @@ public class QdrantClient {
         return true;
     }
 
+    /**
+     * Count distinct {@code doc_id} values in {@code collection} via the facet
+     * API ({@code doc_id} is payload-indexed on every KB collection, which
+     * facet requires). Returns null on 404 (collection doesn't exist).
+     * Accurate up to {@link #DOC_COUNT_FACET_LIMIT} distinct documents; a KB
+     * larger than that reports the limit (saturated, not wrong-by-much —
+     * revisit with a scroll-based count if KBs ever get that big).
+     */
+    public Long countDocuments(String collection) {
+        Map<String, Object> body = Map.of(
+                "key", "doc_id",
+                "limit", DOC_COUNT_FACET_LIMIT,
+                "exact", true);
+        // NOTE: facet lives at /collections/{name}/facet — NOT under /points
+        // like search/delete/query (verified against a live v1.13.4).
+        HttpRequest req = builder("/collections/" + encode(collection) + "/facet")
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(writeJson(body)))
+                .build();
+        HttpResponse<byte[]> resp = sendRaw(req);
+        if (resp.statusCode() == 404) {
+            return null;
+        }
+        if (resp.statusCode() / 100 != 2) {
+            throw new IngestException("Qdrant POST /collections/" + collection
+                    + "/facet returned HTTP " + resp.statusCode() + ": "
+                    + new String(resp.body(), StandardCharsets.UTF_8));
+        }
+        FacetResponse parsed = readJson(resp.body(), new TypeReference<FacetResponse>() {
+        });
+        if (parsed == null || parsed.result == null || parsed.result.hits == null) {
+            return 0L;
+        }
+        return (long) parsed.result.hits.size();
+    }
+
+    private static final int DOC_COUNT_FACET_LIMIT = 10_000;
+
     public void createCollection(String name, int dim) {
         Map<String, Object> vectors = Map.of("size", dim, "distance", distance);
         Map<String, Object> body = Map.of("vectors", vectors);
@@ -586,6 +624,22 @@ public class QdrantClient {
     @JsonIgnoreProperties(ignoreUnknown = true)
     static class CollectionsList {
         public List<CollectionSummary> collections;
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    static class FacetResponse {
+        public FacetResult result;
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    static class FacetResult {
+        public List<FacetHit> hits;
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    static class FacetHit {
+        public Object value;
+        public long count;
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

@@ -7,17 +7,29 @@ for minutes.
 | File | Role |
 |------|------|
 | `JobStatus.java` | Enum: `QUEUED` / `IN_PROGRESS` / `COMPLETED` / `FAILED`. |
-| `IngestJob.java` | Record: jobId, status, request snapshot, docId, timestamps, result, error, warnings, retryCount. |
+| `JobKind.java` | Enum: `VISUAL` (normal since the split) / `FULL` (legacy both-pipelines). |
+| `IngestJob.java` | Record: jobId, status, kind, request snapshot, docId, timestamps, result, error, warnings, retryCount. |
 | `IngestQueue.java` | In-memory queue + file-backed persistence. |
 | `IngestWorker.java` | Background thread(s) draining the queue. |
 
-The queue exists because **CPU-only ColPali sidecars are slow**. Embedding a
-100-page PDF on a CPU is multi-minute work. We can't hold an MCP connection
-that long; the agent times out. Async ingest lets the tool return a
-`{processing_status: "queued", job_id: ...}` immediately, and the agent
-polls `get_ingest_status(job_id)` until completion.
+The queue exists because **VLM page embedding is slow** (multi-minute for a
+100-page PDF on CPU sidecars; still the long pole on GPU). We can't hold an
+MCP connection that long; the agent times out. Async ingest lets the tool
+return a `{processing_status: "queued", job_id: ...}` immediately, and the
+agent polls `get_ingest_status(job_id)` until completion.
 
-## When does an ingest get queued?
+**The split (2026-07, see `docs/plans/split-visual-ingest-v1.md`):** queued
+jobs are visual-only. The text side (Tika → chunk → bge → upsert) always runs
+synchronously at submit — it's seconds of work, the caller gets a real
+`chunk_count`, and the doc is text-searchable immediately. The queue is a pure
+VLM lane: back-to-back GPU work with no Tika/bge gaps between jobs. Chunks and
+pages need no ingest-time link; they join at search time via the shared docId.
+`<kb>_pages` is created eagerly at submit so the KB's visual-capability flag
+(the collection's existence) is truthful while jobs drain. Jobs persisted
+before the split deserialize with `kind == null` → normalized to `FULL` and
+recovered through the legacy both-pipelines worker path.
+
+## When does an ingest get (its visual side) queued?
 
 `QdrantBackend.shouldQueue(file, visualRequested)`:
 
@@ -25,7 +37,7 @@ polls `get_ingest_status(job_id)` until completion.
 - **No** if the file isn't a PDF (no page count available; embedding a single
   DOCX is fast).
 - **No** if PDF page count `< ingest.queue.sync_threshold_pages` (default 20).
-- **Yes** otherwise.
+- **Yes** otherwise — and then only the VISUAL job queues; text already ran.
 
 The threshold is the one knob. On a CPU sidecar deployment, set
 `INGEST_ASYNC_THRESHOLD_PAGES=5` to queue almost everything. On a GPU
@@ -43,15 +55,20 @@ QdrantBackend.ingest
    ├─► validate mode consistency
    ├─► pre-flight sidecar health check
    │
-   └─► shouldQueue? ──── yes ────► IngestQueue.submit
+   └─► shouldQueue? ──── yes ────► ensure <kb>_pages exists (eager,
+                                       │    dim from sidecar /info)
+                                       ├─► text pipeline runs SYNC
+                                       │    (delete prior chunks → Tika →
+                                       │     chunk → bge → upsert)
+                                       ├─► IngestQueue.submit(VISUAL job)
                                        │   (writes <jobId>.json to disk,
                                        │    appends to in-memory queue)
                                        ▼
-                                  IngestResult.queued{jobId, "queued", 0 chunks}
-                                       │
+                                  IngestResult.queuedVisual{jobId, "queued",
+                                       │                    N chunks}
                                        ▼
-                                  agent receives, starts polling
-                                  get_ingest_status(jobId)
+                                  agent receives (text searchable now),
+                                  polls get_ingest_status(jobId)
                        (background)
                        ──────────────►
                        IngestWorker thread
@@ -61,7 +78,9 @@ QdrantBackend.ingest
                                   ▼ (atomically marks IN_PROGRESS)
                            processOne(job)
                              ├─► QdrantBackend.ingestForWorker(job)
-                             │       (re-fetches, re-validates, doIngest)
+                             │     VISUAL → delete prior pages → render →
+                             │              VLM embed → upsert pages
+                             │     FULL (legacy) → re-validate, doIngest (both sides)
                              ├─► queue.markCompleted(jobId, result)   on success
                              └─► queue.markFailed(jobId, error)        on exception
 ```
@@ -103,13 +122,18 @@ public record IngestJob(
     IngestResult result,         // null until COMPLETED
     String error,                // null unless FAILED
     List<String> warnings,
-    int retryCount               // bumped on crash recovery
+    int retryCount,              // bumped on crash recovery
+    JobKind kind                 // VISUAL (normal) / FULL (legacy); null on
+                                 // pre-split persisted jobs — read via
+                                 // effectiveKind(), which maps null → FULL
 )
 ```
 
-`IngestJob.queued(request, docId)` creates a fresh job. The state-transition
-helpers (`withStarted`, `withCompleted`, `withFailed`, `requeueAfterCrash`)
-return new records — the type is immutable, all writes go through the queue.
+`IngestJob.queuedVisual(request, docId)` creates the normal visual-only job;
+`queued(request, docId)` creates a legacy FULL job (kept for back-compat and
+tests). The state-transition helpers (`withStarted`, `withCompleted`,
+`withFailed`, `requeueAfterCrash`) return new records — the type is immutable,
+all writes go through the queue.
 
 ## `IngestQueue`
 
@@ -253,7 +277,7 @@ Returns the full `IngestJob` record. Agents poll until
 | Key | Env | Default | Notes |
 |-----|-----|---------|-------|
 | `ingest.queue.persistence_path` | `INGEST_QUEUE_PATH` | `${user.home}/.pdf-rag-ingest/queue` | File-backed persistence root. |
-| `ingest.queue.worker_threads` | `INGEST_QUEUE_WORKERS` | `1` | Concurrent workers. Most useful on multi-GPU sidecars. |
+| `ingest.queue.worker_threads` | `INGEST_QUEUE_WORKERS` | `1` | Concurrent workers. `2` lets one worker rasterize (CPU) while another's batch is on the GPU — the sidecar serializes GPU work, so this fills inter-file render gaps without contention. |
 | `ingest.queue.sync_threshold_pages` | `INGEST_ASYNC_THRESHOLD_PAGES` | `20` | PDFs at or above this page count get queued; smaller stay sync. |
 | `ingest.queue.max_retries` | — | `3` | Cap on crash-recovery retries before a job is permanently `FAILED`. |
 | `ingest.queue.poll_timeout_ms` | — | `1000` | Worker poll interval. |

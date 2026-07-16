@@ -148,12 +148,7 @@ public class ColPaliPipeline {
 
         // Ensure the <kb>_pages collection exists with the expected three named vectors.
         String pagesCollection = pagesCollectionName(req.kbName());
-        Map<String, QdrantClient.MultiVectorConfig> namedVectors = new LinkedHashMap<>();
-        namedVectors.put("original", QdrantClient.MultiVectorConfig.originalRerankOnly(vectorDim));
-        namedVectors.put("pooled_rows", QdrantClient.MultiVectorConfig.pooled(vectorDim));
-        namedVectors.put("pooled_cols", QdrantClient.MultiVectorConfig.pooled(vectorDim));
-        qdrant.ensureMultivectorCollection(pagesCollection, namedVectors);
-        qdrant.ensurePayloadIndexes(pagesCollection, INDEXED_PAYLOAD_FIELDS);
+        ensureCollection(pagesCollection, vectorDim);
 
         // Build multivector points.
         Map<String, Object> userMeta = req.metadata() == null ? Map.of() : req.metadata();
@@ -248,6 +243,33 @@ public class ColPaliPipeline {
                     p));
         }
         return out;
+    }
+
+    /**
+     * Eagerly create the {@code <kb>_pages} collection (idempotent), taking the
+     * vector dim from the sidecar's {@code /info}. Used at submit time by the
+     * split visual-ingest flow so the KB's visual-capability flag — the
+     * existence of {@code <kb>_pages} — is truthful while the queued visual
+     * job drains; otherwise a second ingest into the same KB would fail mode
+     * validation as "created without a visual index".
+     */
+    public void ensureCollectionFor(String kbName) {
+        ColPaliClient.SidecarInfo info = sidecar.getInfo();
+        if (info == null || info.vector_dim == null) {
+            throw new IngestException("ColPali sidecar /info did not report vector_dim; "
+                    + "cannot create the visual collection for KB '" + kbName + "'");
+        }
+        ensureCollection(pagesCollectionName(kbName), info.vector_dim);
+    }
+
+    /** Idempotently create the pages collection + payload indexes. */
+    private void ensureCollection(String pagesCollection, int vectorDim) {
+        Map<String, QdrantClient.MultiVectorConfig> namedVectors = new LinkedHashMap<>();
+        namedVectors.put("original", QdrantClient.MultiVectorConfig.originalRerankOnly(vectorDim));
+        namedVectors.put("pooled_rows", QdrantClient.MultiVectorConfig.pooled(vectorDim));
+        namedVectors.put("pooled_cols", QdrantClient.MultiVectorConfig.pooled(vectorDim));
+        qdrant.ensureMultivectorCollection(pagesCollection, namedVectors);
+        qdrant.ensurePayloadIndexes(pagesCollection, INDEXED_PAYLOAD_FIELDS);
     }
 
     /** Outcome of deleting a single document's pages: whether the {@code <kb>_pages}

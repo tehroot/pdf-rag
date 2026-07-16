@@ -149,8 +149,11 @@ core/src/main/java/org/hayden/
 
 `server-http` additionally exposes a plain REST surface (`org.hayden.rest.*`,
 `quarkus-rest-jackson`) for bulk/operational use: `POST /ingest/directory`,
-`GET /ingest/status/{jobId}`, `DELETE /ingest/document` (by `doc_id` or
-`source_path`). Logic is in `core` (`DirectoryIngestService`); see
+`GET /ingest/status/{jobId}`, `GET /ingest/jobs` (list, `?status=` filter),
+`DELETE /ingest/document` (by `doc_id` or `source_path`), plus KB status on
+`GET /kb` (listing with per-KB + total distinct-document counts via the
+Qdrant facet API) and `GET /kb/{name}`. Logic is in `core`
+(`DirectoryIngestService`, `IngestService`); see
 [docs/components/directory-ingest.md](docs/components/directory-ingest.md).
 In the Docker deployment, paths in `POST /ingest/directory` resolve *inside
 the container*: the `./incoming` inbox is at `/docs` (`INGEST_INBOX`) and the
@@ -186,26 +189,35 @@ then delegate.
    (named vectors: `original` + `pooled_rows` + `pooled_cols`, MAX_SIM
    comparator, binary quantization on `original`).
 
-### Sync vs async routing
+### Sync vs async routing (split visual ingest)
 
 After step 4 (sidecar health check) and before step 5, `QdrantBackend.ingest`
 calls `shouldQueue(file, visualRequested)`:
 
-- **Sync** (steps 5+6 run immediately, returns full `IngestResult`) if any of:
-  text-only ingest, non-PDF file, PDF below `ingest.queue.sync_threshold_pages`
-  (default 20).
-- **Queue** (returns `IngestResult.queued{jobId, "queued", 0 chunks, 0 pages}`)
-  otherwise.
+- **Fully sync** (steps 5+6 run immediately, returns full `IngestResult`) if
+  any of: text-only ingest, non-PDF file, PDF below
+  `ingest.queue.sync_threshold_pages` (default 20).
+- **Split** otherwise: `<kb>_pages` is created eagerly (dim from sidecar
+  `/info` — keeps the visual-capability flag truthful for mode validation
+  while jobs drain), step 5 (text) runs **synchronously**, and only step 6
+  (visual) is queued as a `JobKind.VISUAL` job. Returns
+  `IngestResult.queuedVisual{jobId, "queued", N chunks, 0 pages}` — the doc
+  is text-searchable immediately; the queue is a pure VLM lane (continuous
+  GPU work, no Tika/bge gaps). Chunks and pages join at search time via the
+  shared docId, so no ingest-time link is needed.
 
 Queued jobs persist to `${INGEST_QUEUE_PATH}/<jobId>.json` and are drained by
-the `IngestWorker` thread pool (`ingest.queue.worker_threads`, default 1).
-The worker re-fetches the file from the persisted request, runs steps 5+6
-via `QdrantBackend.ingestForWorker`, and writes the result back to the queue.
-The agent polls `get_ingest_status(job_id)` to track progress.
+the `IngestWorker` thread pool (`ingest.queue.worker_threads`, default 1;
+`2` overlaps one worker's rasterizing with another's GPU embedding). The
+worker re-fetches the file from the persisted request and dispatches on
+`job.effectiveKind()`: `VISUAL` → pages only; `FULL` (legacy jobs persisted
+before the split, `kind == null`) → both pipelines as before. The agent polls
+`get_ingest_status(job_id)` to track progress.
 
 At-least-once on restart: any `IN_PROGRESS` job at startup is requeued
 (`retryCount++`) up to `ingest.queue.max_retries` (default 3). See
-[docs/components/ingest-queue.md](docs/components/ingest-queue.md).
+[docs/components/ingest-queue.md](docs/components/ingest-queue.md) and
+[docs/plans/split-visual-ingest-v1.md](docs/plans/split-visual-ingest-v1.md).
 
 ### Qdrant search pipeline (fusion)
 
@@ -351,6 +363,7 @@ list in [docs/architecture.md](docs/architecture.md).
 | POST | `/collections/{name}/points/delete?wait=true` | delete points by `doc_id` filter |
 | POST | `/collections/{name}/points/search` | single-vector ANN search |
 | POST | `/collections/{name}/points/query` | multistage prefetch+rerank query |
+| POST | `/collections/{name}/facet` | distinct doc_id count (NOT under `/points` — verified live) |
 
 ## ColPali sidecar contract (used by `ColPaliClient`)
 

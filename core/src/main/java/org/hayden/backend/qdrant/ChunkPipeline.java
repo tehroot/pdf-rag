@@ -223,6 +223,17 @@ public class ChunkPipeline {
         return qdrant.getCollection(kbName) != null;
     }
 
+    /**
+     * Distinct document count in the KB's chunk collection (facet on the
+     * payload-indexed {@code doc_id}), or null if the collection doesn't exist.
+     */
+    public Long countDocuments(String kbName) {
+        if (kbName == null || kbName.isBlank()) {
+            return null;
+        }
+        return qdrant.countDocuments(kbName);
+    }
+
     public List<KnowledgeBaseSummary> listKbCollections() {
         List<KnowledgeBaseSummary> out = new ArrayList<>();
         for (QdrantClient.CollectionSummary cs : qdrant.listCollections()) {
