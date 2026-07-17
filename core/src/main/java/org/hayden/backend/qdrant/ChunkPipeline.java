@@ -244,7 +244,11 @@ public class ChunkPipeline {
                 continue;
             }
             QdrantClient.CollectionInfo info = qdrant.getCollection(cs.name());
-            Long vectors = info == null ? null : info.vectors_count;
+            // points_count, not vectors_count: Qdrant 1.10+ returns
+            // vectors_count as null (lazily computed, deprecated), which
+            // parses to 0 and reports every KB as empty. Chunk collections
+            // are single-vector, so points == chunks == vectors.
+            Long vectors = info == null ? null : info.points_count;
             Integer dim = info == null ? null : info.dim();
             out.add(new KnowledgeBaseSummary(BACKEND_NAME, cs.name(), cs.name(), vectors, dim));
         }
