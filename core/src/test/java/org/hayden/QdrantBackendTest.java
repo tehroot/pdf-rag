@@ -361,16 +361,20 @@ class QdrantBackendTest {
                           {"name":"scans"},
                           {"name":"scans_pages"}
                         ]}}""")));
+        // Real 1.10+ Qdrant reports vectors_count as null (deprecated, lazily
+        // computed); points_count is the reliable field. Mirror that here.
         mock.stubFor(get(urlEqualTo("/collections/docs"))
                 .willReturn(aResponse().withStatus(200).withBody("""
                         {"result":{
-                          "vectors_count": 17,
+                          "points_count": 17,
+                          "vectors_count": null,
                           "config":{"params":{"vectors":{"size":3,"distance":"Cosine"}}}
                         }}""")));
         mock.stubFor(get(urlEqualTo("/collections/scans"))
                 .willReturn(aResponse().withStatus(200).withBody("""
                         {"result":{
-                          "vectors_count": 42,
+                          "points_count": 42,
+                          "vectors_count": null,
                           "config":{"params":{"vectors":{"size":3,"distance":"Cosine"}}}
                         }}""")));
         mock.stubFor(get(urlEqualTo("/collections/docs_pages"))

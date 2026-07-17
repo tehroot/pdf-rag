@@ -70,19 +70,22 @@ class QdrantClientTest {
 
     @Test
     void getCollection_parsesDimAndCounts() {
+        // vectors_count is null on real 1.10+ Qdrant (deprecated); points_count
+        // is the reliable population metric. The null must parse without error.
         server.stubFor(get(urlEqualTo("/collections/docs"))
                 .willReturn(aResponse().withStatus(200)
                         .withBody("""
                                 {"result":{
                                   "points_count": 42,
-                                  "vectors_count": 42,
+                                  "vectors_count": null,
                                   "config":{"params":{"vectors":{"size":384,"distance":"Cosine"}}}
                                 }}""")));
 
         QdrantClient.CollectionInfo info = client.getCollection("docs");
         assertThat(info).isNotNull();
         assertThat(info.dim()).isEqualTo(384);
-        assertThat(info.vectors_count).isEqualTo(42);
+        assertThat(info.points_count).isEqualTo(42);
+        assertThat(info.vectors_count).isZero();   // null → 0 on the primitive field
     }
 
     @Test
