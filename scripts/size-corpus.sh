@@ -10,7 +10,9 @@
 # (building it first if needed). Requires Java 21 on the host.
 #
 # On a deployed host without Java, run it inside the pdf-rag-http container
-# instead (paths are container-side, e.g. under /host):
+# instead (paths are container-side, e.g. under /host). The image must have
+# been built from a commit that contains CorpusSizer — after pulling, rebuild
+# with scripts/build-images.sh (or docker compose build pdf-rag-http) first:
 #   docker compose exec pdf-rag-http java \
 #     -cp '/app/app/*:/app/lib/main/*:/app/lib/boot/*' \
 #     org.hayden.sizing.CorpusSizer /host/<path> --sample 500
@@ -19,9 +21,15 @@ set -euo pipefail
 
 APP_DIR="$ROOT/server-http/target/quarkus-app"
 
-if [ ! -d "$APP_DIR/lib/main" ]; then
+# Rebuild when the built core jar is missing OR predates CorpusSizer — a bare
+# directory-existence check lets a stale pre-CorpusSizer build through and dies
+# with ClassNotFound. Zip entry names are stored uncompressed, so grep-ing the
+# jar finds the class without needing unzip; -a forces a raw byte scan (BSD
+# grep's binary-file handling otherwise misses matches past NUL bytes).
+core_jar="$(ls "$APP_DIR"/lib/main/org.hayden.pdf-rag-ingest-core-*.jar 2>/dev/null | head -n1 || true)"
+if [ -z "$core_jar" ] || ! LC_ALL=C grep -qa 'org/hayden/sizing/CorpusSizer.class' "$core_jar"; then
   require_cmd mvn
-  info "building server-http (first run)"
+  info "building server-http (missing or stale build)"
   ( cd "$ROOT" && run mvn -pl server-http -am package -DskipTests -q )
 fi
 
