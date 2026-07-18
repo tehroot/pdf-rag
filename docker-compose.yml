@@ -56,12 +56,19 @@ services:
     # The /models mount is the host's ./models directory.
     image: ghcr.io/ggml-org/llama.cpp:server
     container_name: pdf-rag-llama
+    # --parallel N serves N embedding requests concurrently (continuous
+    # batching) — a single slot leaves a multi-core host idle and caps CPU
+    # embedding around ~23 chunks/s. NOTE: --ctx-size is divided across slots
+    # (8192 / 4 = 2048 per slot), so keep ctx-per-slot above the model's token
+    # cap (512 for bge-*) when raising LLAMA_PARALLEL.
     command: >
       -m /models/${LLAMA_MODEL_FILE:-bge-small-en-v1.5-f16.gguf}
       --embeddings
       --host 0.0.0.0
       --port 8081
       --ctx-size ${LLAMA_CTX_SIZE:-8192}
+      --parallel ${LLAMA_PARALLEL:-4}
+      --cont-batching
     volumes:
       - ./models:/models:ro
     ports:
@@ -130,9 +137,11 @@ services:
       EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE:-64}
 
       # Chunking — keep INGEST_CHUNK_SIZE_CHARS below the embedding model's
-      # max sequence length when tokenized. bge-* models are 512 tokens hard;
-      # 1000 chars is safe for dense technical text (data sheets, code).
-      INGEST_CHUNK_SIZE_CHARS: ${INGEST_CHUNK_SIZE_CHARS:-1500}
+      # max sequence length when tokenized. bge-* models are 512 tokens hard,
+      # and the default EMBED_MODEL here is bge-small: 1500 chars busts the cap
+      # on dense technical text (llama-server rejects with "input too large"),
+      # so the compose default is 700.
+      INGEST_CHUNK_SIZE_CHARS: ${INGEST_CHUNK_SIZE_CHARS:-700}
       INGEST_CHUNK_OVERLAP_CHARS: ${INGEST_CHUNK_OVERLAP_CHARS:-200}
 
       # ColPali sidecar

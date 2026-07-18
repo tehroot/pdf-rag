@@ -231,8 +231,18 @@ public class QdrantClient {
     public void ensureCollection(String name, int dim) {
         CollectionInfo existing = getCollection(name);
         if (existing == null) {
-            createCollection(name, dim);
-            return;
+            try {
+                createCollection(name, dim);
+                return;
+            } catch (IngestException e) {
+                // Concurrent ingests race here: both GET null, both PUT create,
+                // the loser gets a conflict. If the collection now exists, fall
+                // through to the dim check below instead of failing the ingest.
+                existing = getCollection(name);
+                if (existing == null) {
+                    throw e;
+                }
+            }
         }
         Integer existingDim = existing.dim();
         if (existingDim != null && existingDim != dim) {
@@ -303,8 +313,18 @@ public class QdrantClient {
     public void ensureMultivectorCollection(String name, Map<String, MultiVectorConfig> namedVectors) {
         CollectionInfo existing = getCollection(name);
         if (existing == null) {
-            createMultivectorCollection(name, namedVectors);
-            return;
+            try {
+                createMultivectorCollection(name, namedVectors);
+                return;
+            } catch (IngestException e) {
+                // Same create race as ensureCollection: concurrent visual
+                // workers / parallel directory ingests can both attempt the
+                // create. If it exists now, fall through to the shape check.
+                existing = getCollection(name);
+                if (existing == null) {
+                    throw e;
+                }
+            }
         }
         if (existing.dim() != null) {
             throw new IngestException("Collection '" + name + "' is configured as a single-vector "

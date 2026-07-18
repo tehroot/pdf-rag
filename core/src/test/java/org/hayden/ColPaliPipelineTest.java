@@ -319,6 +319,52 @@ class ColPaliPipelineTest {
                 .isEqualTo("engineering-docs_pages");
     }
 
+    @Test
+    void ingestPages_splitsUpsertsIntoBatches() throws Exception {
+        // 5 pages at batch size 2 → three upsert requests of 2 + 2 + 1 points.
+        // Unbatched multivector upserts are the failure mode that killed real
+        // ingests: page points are megabytes as JSON and Qdrant caps request
+        // bodies, so a whole-document upsert dies on any non-trivial PDF.
+        setField(pipeline, "multivectorUpsertBatchSize", 2);
+
+        StringBuilder embeddings = new StringBuilder();
+        for (int p = 1; p <= 5; p++) {
+            if (p > 1) embeddings.append(',');
+            embeddings.append("{\"page_id\":\"d-1:").append(p).append("\",")
+                    .append("\"original\":[[0.1,0.2]],")
+                    .append("\"pooled_rows\":[[0.1,0.2]],")
+                    .append("\"pooled_cols\":[[0.1,0.2]]}");
+        }
+        server.stubFor(post(urlEqualTo("/embed_pages"))
+                .willReturn(aResponse().withStatus(200)
+                        .withBody("{\"embeddings\":[" + embeddings + "]}")));
+        server.stubFor(get(urlEqualTo("/info"))
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"model_name":"vidore/colqwen2-v1.0","vector_dim":2,
+                         "supports_pooled":true,"max_batch_size":8,"device":"cpu"}""")));
+        server.stubFor(get(urlEqualTo("/collections/docs_pages"))
+                .willReturn(aResponse().withStatus(404)));
+        server.stubFor(put(urlEqualTo("/collections/docs_pages"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+        server.stubFor(put(urlPathEqualTo("/collections/docs_pages/points"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+
+        IngestRequest req = new IngestRequest(SourceType.PATH, "/tmp/test.pdf", null,
+                "docs", null, 0L, "qdrant", Map.of());
+        ColPaliPipeline.PagesIngestResult result =
+                pipeline.ingestPages(req, pdfFixture(5), "d-1");
+
+        assertThat(result.pageCount()).isEqualTo(5);
+        var upserts = server.findAll(putRequestedFor(urlPathEqualTo("/collections/docs_pages/points")));
+        assertThat(upserts).hasSize(3);
+        ObjectMapper mapper = new ObjectMapper();
+        List<Integer> batchSizes = new java.util.ArrayList<>();
+        for (var u : upserts) {
+            batchSizes.add(mapper.readTree(u.getBody()).get("points").size());
+        }
+        assertThat(batchSizes).containsExactly(2, 2, 1);
+    }
+
     // ---- setup helpers ------------------------------------------------------
 
     private static ColPaliPipeline newPipeline(String baseUrl, String storeRoot) throws Exception {
@@ -359,6 +405,7 @@ class ColPaliPipelineTest {
         setField(pipeline, "qdrant", qdrant);
         setField(pipeline, "imageStore", store);
         setField(pipeline, "prefetchMultiplier", 10);
+        setField(pipeline, "multivectorUpsertBatchSize", 8);
         return pipeline;
     }
 

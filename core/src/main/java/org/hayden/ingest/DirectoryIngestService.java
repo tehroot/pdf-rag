@@ -2,6 +2,7 @@ package org.hayden.ingest;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hayden.backend.qdrant.UuidV5;
 import org.jboss.logging.Logger;
 
@@ -14,6 +15,10 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.stream.Stream;
 
 /**
@@ -41,6 +46,16 @@ public class DirectoryIngestService {
     @Inject
     IngestService ingestService;
 
+    /**
+     * Files ingested concurrently per directory scan. Each worker runs the
+     * whole per-file text pipeline (extract, chunk, embed, upsert), so this is
+     * the knob that overlaps Tika/PDFBox CPU work with embedding-server slots.
+     * Pair with llama-server {@code --parallel}/{@code --cont-batching} —
+     * with a single server slot, concurrent embed requests just queue.
+     */
+    @ConfigProperty(name = "ingest.directory.parallelism", defaultValue = "4")
+    int parallelism;
+
     public DirectoryIngestResponse ingestDirectory(DirectoryIngestRequest req) {
         if (req == null) {
             throw new IngestException("request body is required");
@@ -63,37 +78,21 @@ public class DirectoryIngestService {
         boolean recursive = req.recursive() == null || req.recursive();
         Set<String> exts = normalizeExtensions(req.extensions());
         List<Path> files = scan(dir, recursive, exts);
+        if (parallelism < 1) {
+            throw new IngestException("ingest.directory.parallelism must be >= 1 (got "
+                    + parallelism + ")");
+        }
 
-        List<DirectoryFileOutcome> outcomes = new ArrayList<>(files.size());
+        List<DirectoryFileOutcome> outcomes = ingestAll(req, files);
+
         int completed = 0;
         int queued = 0;
         int failed = 0;
-        for (Path f : files) {
-            String abs = canonicalSourcePath(f);
-            String filename = f.getFileName().toString();
-            String docId = UuidV5.forSource(req.kbName(), abs);
-            IngestRequest ir = new IngestRequest(
-                    IngestRequest.SourceType.PATH, abs, filename,
-                    req.kbName(), req.kbDescription(), 0L,
-                    req.backend(), req.metadata(), req.enableVisualIndex());
-            try {
-                IngestResult r = ingestService.ingest(ir, docId);
-                boolean isQueued = "queued".equals(r.processingStatus());
-                if (isQueued) {
-                    queued++;
-                } else {
-                    completed++;
-                }
-                outcomes.add(new DirectoryFileOutcome(abs, filename, r.fileId(),
-                        r.processingStatus(), r.jobId(),
-                        isQueued ? null : r.chunkCount(),
-                        isQueued ? null : r.pageCount(),
-                        r.message()));
-            } catch (RuntimeException e) {
-                failed++;
-                LOG.warnf("Directory ingest failed for %s: %s", abs, e.getMessage());
-                outcomes.add(new DirectoryFileOutcome(abs, filename, docId,
-                        "error", null, null, null, e.getMessage()));
+        for (DirectoryFileOutcome o : outcomes) {
+            switch (o.status()) {
+                case "queued" -> queued++;
+                case "error" -> failed++;
+                default -> completed++;
             }
         }
 
@@ -101,6 +100,69 @@ public class DirectoryIngestService {
                 req.kbName(), dir, files.size(), completed, queued, failed);
         return new DirectoryIngestResponse(dir.toString(), req.kbName(),
                 files.size(), completed, queued, failed, outcomes);
+    }
+
+    /**
+     * Ingest every file on a bounded worker pool, {@code parallelism} files in
+     * flight at once. Outcomes come back in scan order regardless of completion
+     * order. Per-file failure is captured as an "error" outcome (never aborts
+     * the batch), so the only thing that can interrupt collection is the
+     * calling thread itself being interrupted.
+     */
+    private List<DirectoryFileOutcome> ingestAll(DirectoryIngestRequest req, List<Path> files) {
+        if (files.isEmpty()) {
+            return List.of();
+        }
+        int threads = Math.min(parallelism, files.size());
+        ExecutorService pool = Executors.newFixedThreadPool(threads, r -> {
+            Thread t = new Thread(r);
+            t.setName("dir-ingest-" + t.threadId());
+            return t;
+        });
+        try {
+            List<Future<DirectoryFileOutcome>> futures = new ArrayList<>(files.size());
+            for (Path f : files) {
+                futures.add(pool.submit(() -> ingestOne(req, f)));
+            }
+            List<DirectoryFileOutcome> outcomes = new ArrayList<>(files.size());
+            for (Future<DirectoryFileOutcome> future : futures) {
+                outcomes.add(future.get());
+            }
+            return outcomes;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IngestException("Directory ingest interrupted", e);
+        } catch (ExecutionException e) {
+            // ingestOne captures all RuntimeExceptions as outcomes; anything
+            // surfacing here is unexpected (e.g. an Error).
+            throw new IngestException("Directory ingest worker failed: "
+                    + e.getCause().getMessage(), e.getCause());
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    private DirectoryFileOutcome ingestOne(DirectoryIngestRequest req, Path f) {
+        String abs = canonicalSourcePath(f);
+        String filename = f.getFileName().toString();
+        String docId = UuidV5.forSource(req.kbName(), abs);
+        IngestRequest ir = new IngestRequest(
+                IngestRequest.SourceType.PATH, abs, filename,
+                req.kbName(), req.kbDescription(), 0L,
+                req.backend(), req.metadata(), req.enableVisualIndex());
+        try {
+            IngestResult r = ingestService.ingest(ir, docId);
+            boolean isQueued = "queued".equals(r.processingStatus());
+            return new DirectoryFileOutcome(abs, filename, r.fileId(),
+                    r.processingStatus(), r.jobId(),
+                    isQueued ? null : r.chunkCount(),
+                    isQueued ? null : r.pageCount(),
+                    r.message());
+        } catch (RuntimeException e) {
+            LOG.warnf("Directory ingest failed for %s: %s", abs, e.getMessage());
+            return new DirectoryFileOutcome(abs, filename, docId,
+                    "error", null, null, null, e.getMessage());
+        }
     }
 
     /**

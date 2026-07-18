@@ -19,8 +19,11 @@ import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -38,6 +41,9 @@ class DirectoryIngestServiceTest {
         stub = new RecordingIngestService();
         service = new DirectoryIngestService();
         setField(service, "ingestService", stub);
+        // Single worker keeps the recording stub's plain ArrayLists safe; the
+        // parallel path has its own tests with a concurrency-aware stub.
+        setField(service, "parallelism", 1);
     }
 
     @Test
@@ -183,6 +189,65 @@ class DirectoryIngestServiceTest {
 
     // ---- helpers ------------------------------------------------------------
 
+    @Test
+    void parallelIngest_runsFilesConcurrently_andPreservesScanOrder() throws Exception {
+        write("a.pdf", "%PDF-1.4");
+        write("b.txt", "hello");
+        write("c.md", "# heading");
+        setField(service, "parallelism", 3);
+
+        // Every ingest blocks until all three are in flight at once — if the
+        // service were still sequential, the barrier would time out and the
+        // outcomes would come back as errors instead of completions.
+        CyclicBarrier allInFlight = new CyclicBarrier(3);
+        setField(service, "ingestService", new IngestService() {
+            @Override
+            public IngestResult ingest(IngestRequest req, String explicitDocId) {
+                try {
+                    allInFlight.await(5, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    throw new IngestException("not concurrent: " + e, e);
+                }
+                return new IngestResult("qdrant", req.kbName(), req.kbName(), explicitDocId,
+                        "completed", 3, 0, true, "ingested " + req.filename(), List.of(), null);
+            }
+        });
+
+        DirectoryIngestResponse resp = service.ingestDirectory(req(null, null));
+
+        assertThat(resp.completed()).isEqualTo(3);
+        assertThat(resp.failed()).isZero();
+        // Outcomes stay in scan order even though completion order is racy.
+        assertThat(resp.files()).extracting(DirectoryFileOutcome::filename)
+                .containsExactly("a.pdf", "b.txt", "c.md");
+    }
+
+    @Test
+    void parallelIngest_capturesPerFileFailures_withoutAbortingBatch() throws Exception {
+        write("a.pdf", "%PDF-1.4");
+        write("b.txt", "hello");
+        write("c.md", "# heading");
+        setField(service, "parallelism", 3);
+        stub.failFor = "b.txt";
+
+        DirectoryIngestResponse resp = service.ingestDirectory(req(null, null));
+
+        assertThat(resp.completed()).isEqualTo(2);
+        assertThat(resp.failed()).isEqualTo(1);
+        assertThat(resp.files()).extracting(DirectoryFileOutcome::status)
+                .containsExactly("completed", "error", "completed");
+    }
+
+    @Test
+    void parallelism_mustBePositive() throws Exception {
+        write("a.pdf", "%PDF-1.4");
+        setField(service, "parallelism", 0);
+
+        assertThatThrownBy(() -> service.ingestDirectory(req(null, null)))
+                .isInstanceOf(IngestException.class)
+                .hasMessageContaining("parallelism");
+    }
+
     private DirectoryIngestRequest req(Boolean recursive, List<String> extensions) {
         return new DirectoryIngestRequest(root.toString(), "docs", null,
                 recursive, extensions, null, null, null);
@@ -200,10 +265,11 @@ class DirectoryIngestServiceTest {
         f.set(target, value);
     }
 
-    /** Stub IngestService that records the (request, docId) pairs it's handed. */
+    /** Stub IngestService that records the (request, docId) pairs it's handed.
+     *  Lists are synchronized so parallelism > 1 tests can reuse the stub. */
     private static final class RecordingIngestService extends IngestService {
-        final List<String> docIds = new ArrayList<>();
-        final List<IngestRequest> requests = new ArrayList<>();
+        final List<String> docIds = Collections.synchronizedList(new ArrayList<>());
+        final List<IngestRequest> requests = Collections.synchronizedList(new ArrayList<>());
         String failFor;
         String queueFor;
         String deletedDocId;
