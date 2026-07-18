@@ -42,3 +42,12 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  pdf-rag-http:
+    environment:
+      # GPU-host tuning (same ${VAR:-default} pattern — .env still wins).
+      # Two queue workers overlap one job's CPU rasterizing with another's GPU
+      # embedding; batch 8 matches the CUDA sidecar's max_batch_size so client
+      # batches arrive GPU-sized instead of half-filled.
+      INGEST_QUEUE_WORKERS: ${INGEST_QUEUE_WORKERS:-2}
+      COLPALI_BATCH_SIZE: ${COLPALI_BATCH_SIZE:-8}

@@ -40,6 +40,7 @@ symlink — `scripts/up.sh` is always CPU, `--gpu` is always GPU, regardless of 
 | `clean.sh` | Tear down + delete volumes + `mvn clean`. `--all` also removes the sidecar venv. Keeps `./models`, `./incoming`, `.env`. |
 | `pipeline.sh` | The capstone: test → build images → up → smoke. `--gpu`, `--full`, `--no-test`. |
 | `size-corpus.sh` | Corpus-sizing scan: sample a directory of PDFs and project pages, chunks, embed time, and storage for both pipelines before ingesting. `--sample N`, `--json PATH`; run with no args for all options. Needs host Java 21 (or run `CorpusSizer` inside the pdf-rag-http container — see the script header). |
+| `phrase-cluster.py` | Retrieval probe: embed a phrase, search a KB across all docs, and report hit concentration by document (boilerplate shows up as a few docs dominating). `--json PATH` adds 2D PCA coords of the hit embeddings for cluster visualization. Reads `QDRANT_URL`/`EMBED_BASE_URL`/`EMBED_MODEL` from env or `.env`; needs python3 + numpy. |
 | `lib.sh` | Shared helpers (sourced, not run): compose wrapper + GPU overlay, `.env` loader, logging, health probes. |
 
 ## CPU vs GPU

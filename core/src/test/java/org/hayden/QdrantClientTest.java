@@ -325,6 +325,89 @@ class QdrantClientTest {
     }
 
     @Test
+    void ensureCollection_toleratesConcurrentCreateRace() {
+        // Two ingests race: both GET 404, both PUT create, the loser gets a
+        // conflict. The loser must re-GET and accept the winner's collection.
+        server.stubFor(get(urlEqualTo("/collections/docs"))
+                .inScenario("create-race")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(404).withBody("{}")));
+        server.stubFor(put(urlEqualTo("/collections/docs"))
+                .inScenario("create-race")
+                .willSetStateTo("created")
+                .willReturn(aResponse().withStatus(409)
+                        .withBody("{\"status\":{\"error\":\"already exists\"}}")));
+        server.stubFor(get(urlEqualTo("/collections/docs"))
+                .inScenario("create-race")
+                .whenScenarioStateIs("created")
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":{
+                          "config":{"params":{"vectors":{"size":384,"distance":"Cosine"}}}
+                        }}""")));
+
+        client.ensureCollection("docs", 384);   // must not throw
+
+        server.verify(putRequestedFor(urlEqualTo("/collections/docs")));
+    }
+
+    @Test
+    void ensureCollection_concurrentCreateRace_stillRejectsDimMismatch() {
+        // Same race, but the winner created the collection with a different
+        // dim — the loser must still surface the mismatch, not swallow it.
+        server.stubFor(get(urlEqualTo("/collections/docs"))
+                .inScenario("race-dim")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(404).withBody("{}")));
+        server.stubFor(put(urlEqualTo("/collections/docs"))
+                .inScenario("race-dim")
+                .willSetStateTo("created")
+                .willReturn(aResponse().withStatus(409)
+                        .withBody("{\"status\":{\"error\":\"already exists\"}}")));
+        server.stubFor(get(urlEqualTo("/collections/docs"))
+                .inScenario("race-dim")
+                .whenScenarioStateIs("created")
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":{
+                          "config":{"params":{"vectors":{"size":512,"distance":"Cosine"}}}
+                        }}""")));
+
+        assertThatThrownBy(() -> client.ensureCollection("docs", 384))
+                .isInstanceOf(IngestException.class)
+                .hasMessageContaining("dim=512");
+    }
+
+    @Test
+    void ensureMultivectorCollection_toleratesConcurrentCreateRace() {
+        // Same race on the <kb>_pages collection (two visual queue workers, or
+        // eager creation from parallel directory ingests).
+        server.stubFor(get(urlEqualTo("/collections/pages"))
+                .inScenario("mv-race")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(404).withBody("{}")));
+        server.stubFor(put(urlEqualTo("/collections/pages"))
+                .inScenario("mv-race")
+                .willSetStateTo("created")
+                .willReturn(aResponse().withStatus(409)
+                        .withBody("{\"status\":{\"error\":\"already exists\"}}")));
+        server.stubFor(get(urlEqualTo("/collections/pages"))
+                .inScenario("mv-race")
+                .whenScenarioStateIs("created")
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":{
+                          "config":{"params":{"vectors":{
+                            "original":{"size":128},
+                            "pooled_rows":{"size":128}
+                          }}}
+                        }}""")));
+
+        client.ensureMultivectorCollection("pages",
+                Map.of("original", QdrantClient.MultiVectorConfig.originalRerankOnly(128),
+                       "pooled_rows", QdrantClient.MultiVectorConfig.pooled(128)));   // must not throw
+
+        server.verify(putRequestedFor(urlEqualTo("/collections/pages")));
+    }
+
+    @Test
     void ensureMultivectorCollection_rejectsExistingSingleVectorCollection() {
         // A single-vector collection at the same name → shape mismatch error.
         server.stubFor(get(urlEqualTo("/collections/pages"))

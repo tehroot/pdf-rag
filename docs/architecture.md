@@ -333,6 +333,9 @@ transports.
 | `ingest.qdrant.url` | `http://localhost:6333` | from `QDRANT_URL` |
 | `ingest.qdrant.api-key` | *(empty)* | from `QDRANT_API_KEY` |
 | `ingest.qdrant.distance` | `Cosine` | applied on collection create |
+| `ingest.qdrant.upsert-batch-size` | `128` | from `INGEST_QDRANT_UPSERT_BATCH`; chunk points per upsert |
+| `ingest.qdrant.multivector-upsert-batch-size` | `8` | from `INGEST_QDRANT_MULTIVECTOR_UPSERT_BATCH`; page points per upsert (~2 MB JSON each vs Qdrant's ~32 MB request cap) |
+| `ingest.directory.parallelism` | `4` | from `INGEST_DIRECTORY_PARALLELISM`; concurrent files per directory scan |
 | `ingest.embed.base-url` | `http://localhost:8081/v1` | llama-server / OpenAI-compat |
 | `ingest.embed.api-key` | *(empty)* | `Authorization: Bearer …` |
 | `ingest.embed.model` | `bge-large-en-v1.5` | from `EMBED_MODEL` |

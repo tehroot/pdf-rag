@@ -221,13 +221,23 @@ cheap no-op; it also discards a previous partial attempt on a worker retry.)
 - **Reuses `IngestService`, not a parallel path.** Each file goes through the
   exact dispatch + sync/queue routing + validation the MCP tool uses, so
   behavior can't drift between the two entry points.
+- **Bounded per-file parallelism.** Files run on a worker pool of
+  `ingest.directory.parallelism` (`INGEST_DIRECTORY_PARALLELISM`, default 4)
+  threads, each executing the whole per-file text pipeline — so Tika/PDFBox
+  extraction overlaps with embedding-server slots. Outcomes are collected in
+  scan order regardless of completion order. Pair the parallelism with
+  llama-server `--parallel`/`--cont-batching`: with a single server slot,
+  concurrent embed requests just queue and the extra threads only help
+  extraction. Collection creation is race-safe (`ensureCollection` tolerates
+  the concurrent-create conflict by re-reading).
 - **200-with-per-file-status, not fail-fast.** A bulk scan over hundreds of
   files shouldn't die because one PDF is a scan with no text layer. The caller
   gets a complete ledger.
 - **Synchronous request (caveat).** The endpoint processes files in the request
-  thread; large *visual* directories return fast (their files queue), but a
-  directory of hundreds of text files will block until done. If true
-  fire-and-forget is needed, a batch-job wrapper is the follow-up.
+  thread (fanning out to the pool); large *visual* directories still queue
+  their heavy half, but a directory of hundreds of text files blocks until the
+  text pass is done. If true fire-and-forget is needed, a batch-job wrapper is
+  the follow-up.
 - **No sandbox.** Any absolute path the process can read is allowed (a
   deliberate choice — see the design decision log). What the process *can*
   read is bounded by the container's mounts: the `/docs` inbox plus the

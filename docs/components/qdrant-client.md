@@ -35,7 +35,8 @@ Bold = added for the visual pipeline. Earlier methods are unchanged.
 | `ingest.qdrant.distance` | — | `Cosine` |
 | `ingest.qdrant.connect-timeout-seconds` | — | `10` |
 | `ingest.qdrant.request-timeout-seconds` | — | `120` |
-| `ingest.qdrant.upsert-batch-size` | — | `128` |
+| `ingest.qdrant.upsert-batch-size` | `INGEST_QDRANT_UPSERT_BATCH` | `128` |
+| `ingest.qdrant.multivector-upsert-batch-size` | `INGEST_QDRANT_MULTIVECTOR_UPSERT_BATCH` | `8` |
 
 Auth: `api-key` header (Qdrant's convention, not `Authorization: Bearer`).
 Empty for local; set for Qdrant Cloud.
@@ -160,6 +161,14 @@ public record MultiVectorPoint(String id,
                                 Map<String, float[][]> vectors,
                                 Map<String, Object> payload);
 ```
+
+**Callers must batch small** (`ColPaliPipeline` batches by
+`ingest.qdrant.multivector-upsert-batch-size`, default 8 — mirroring how
+`ChunkPipeline` batches by `upsert-batch-size` on the text side). A
+ColQwen2-class page point serializes to ~1.5–2 MB of JSON, and Qdrant rejects
+request bodies over its ~32 MB `max_request_size_mb` cap — an unbatched
+whole-document upsert fails with an I/O error on any non-trivial PDF, *after*
+the render and GPU-embed cost is already spent.
 
 Wire shape:
 

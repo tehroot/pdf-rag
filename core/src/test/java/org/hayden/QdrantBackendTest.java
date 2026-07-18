@@ -801,6 +801,7 @@ class QdrantBackendTest {
         setField(pages, "qdrant", qdrant);
         setField(pages, "imageStore", store);
         setField(pages, "prefetchMultiplier", 10);
+        setField(pages, "multivectorUpsertBatchSize", 8);
 
         setField(backend, "pages", pages);
         setField(backend, "defaultVisualIndexEnabled", false);

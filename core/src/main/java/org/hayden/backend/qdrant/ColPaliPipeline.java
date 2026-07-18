@@ -47,6 +47,16 @@ public class ColPaliPipeline {
     @ConfigProperty(name = "ingest.colpali.prefetch-multiplier", defaultValue = "10")
     int prefetchMultiplier;
 
+    /**
+     * Pages per multivector upsert request. Deliberately separate from (and far
+     * smaller than) the text side's {@code upsert-batch-size}: a ColQwen2-class
+     * page is ~1.5–2 MB as JSON (original + pooled multivectors), and Qdrant
+     * rejects request bodies over its ~32 MB cap, so an unbatched multi-page
+     * doc fails at upsert after all the render/embed work is done.
+     */
+    @ConfigProperty(name = "ingest.qdrant.multivector-upsert-batch-size", defaultValue = "8")
+    int multivectorUpsertBatchSize;
+
     /** Default top-K for searchPages when the caller doesn't specify. */
     private static final int DEFAULT_SEARCH_TOP_K = 10;
 
@@ -184,7 +194,14 @@ public class ColPaliPipeline {
             points.add(new QdrantClient.MultiVectorPoint(pointId, vectors, payload));
         }
 
-        qdrant.upsertMultivectorPoints(pagesCollection, points);
+        if (multivectorUpsertBatchSize <= 0) {
+            throw new IngestException("ingest.qdrant.multivector-upsert-batch-size must be > 0 (got "
+                    + multivectorUpsertBatchSize + ")");
+        }
+        for (int i = 0; i < points.size(); i += multivectorUpsertBatchSize) {
+            int end = Math.min(i + multivectorUpsertBatchSize, points.size());
+            qdrant.upsertMultivectorPoints(pagesCollection, points.subList(i, end));
+        }
 
         LOG.infof("ingest visual kb=%s doc=%s file=%s pages=%d dim=%d "
                         + "render=%dms probe+store=%dms embed=%dms upsert=%dms",

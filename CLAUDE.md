@@ -208,7 +208,8 @@ calls `shouldQueue(file, visualRequested)`:
 
 Queued jobs persist to `${INGEST_QUEUE_PATH}/<jobId>.json` and are drained by
 the `IngestWorker` thread pool (`ingest.queue.worker_threads`, default 1;
-`2` overlaps one worker's rasterizing with another's GPU embedding). The
+`2` overlaps one worker's rasterizing with another's GPU embedding — the GPU
+compose overlay defaults to 2). The
 worker re-fetches the file from the persisted request and dispatches on
 `job.effectiveKind()`: `VISUAL` → pages only; `FULL` (legacy jobs persisted
 before the split, `kind == null`) → both pipelines as before. The agent polls
@@ -310,6 +311,20 @@ model-agnostic via `/info`.
   `ColPaliPipeline.isEnabledFor(kbName)` calls `qdrant.getCollection(<kb>_pages)
   != null`. No separate metadata store.
 
+- **Multivector upserts MUST stay batched small.** A ColQwen2-class page point
+  is ~1.5–2 MB as JSON (original + pooled multivectors) and Qdrant rejects
+  request bodies over its ~32 MB cap — an unbatched multi-page upsert fails
+  with an I/O error *after* all render/embed work is spent (this killed 100+
+  real visual jobs before `ingest.qdrant.multivector-upsert-batch-size`
+  existed). The text side's `INGEST_QDRANT_UPSERT_BATCH=128` is tuned for
+  ~8 KB chunk points; never reuse it for pages.
+
+- **Concurrent ingests race on collection creation.** Parallel directory
+  ingest and multi-worker visual queues can both GET-404 then PUT-create the
+  same collection; `ensureCollection`/`ensureMultivectorCollection` tolerate
+  the loser's conflict by re-reading and validating. Don't "simplify" that
+  try/catch away.
+
 ## Configuration
 
 Env vars (consumed via `@ConfigProperty`, see
@@ -327,12 +342,14 @@ Env vars (consumed via `@ConfigProperty`, see
 | `EMBED_API_KEY` | `Authorization: Bearer …` | *(empty)* |
 | `EMBED_MODEL` | model name | `bge-large-en-v1.5` |
 | `EMBED_BATCH_SIZE` | batch size per `/embeddings` | `64` |
-| `INGEST_CHUNK_SIZE_CHARS` | chunk size in characters | `1500` |
+| `INGEST_CHUNK_SIZE_CHARS` | chunk size in characters (compose defaults it to `700` — bge's 512-token cap) | `1500` |
 | `INGEST_CHUNK_OVERLAP_CHARS` | adjacent-chunk overlap | `200` |
 | `INGEST_CHUNK_STRATEGY` | `sliding` or `structural` (heading-aware + breadcrumbs) | `sliding` |
 | `INGEST_CHUNK_HEADING_FONT_RATIO` | PDF heading threshold vs body font | `1.15` |
 | `INGEST_CHUNK_BREADCRUMB_MAX_CHARS` | cap on breadcrumb prefix in embedded text | `120` |
-| `INGEST_QDRANT_UPSERT_BATCH` | points per Qdrant upsert call | `128` |
+| `INGEST_QDRANT_UPSERT_BATCH` | chunk points per Qdrant upsert call (text side) | `128` |
+| `INGEST_QDRANT_MULTIVECTOR_UPSERT_BATCH` | page points per multivector upsert (visual side; see gotcha) | `8` |
+| `INGEST_DIRECTORY_PARALLELISM` | files ingested concurrently per `POST /ingest/directory` | `4` |
 | `COLPALI_PREFETCH_MULTIPLIER` | multistage prefetch = N × top_k | `10` |
 | `INGEST_SEARCH_DEBUG_CANDIDATES` | log candidate lists + scores at INFO | `false` |
 | `INGEST_SEARCH_DEDUP` | collapse overlapping chunks in results | `true` |

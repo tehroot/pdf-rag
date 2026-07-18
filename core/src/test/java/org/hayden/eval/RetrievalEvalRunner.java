@@ -135,6 +135,7 @@ class RetrievalEvalRunner {
         set(pages, "sidecar", sidecar);
         set(pages, "qdrant", qdrant);
         set(pages, "prefetchMultiplier", 10);
+        set(pages, "multivectorUpsertBatchSize", 8);
 
         ConfidenceCalculator confidence = new ConfidenceCalculator();
         set(confidence, "weightText", 0.4);
