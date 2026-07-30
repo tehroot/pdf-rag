@@ -99,6 +99,12 @@ driven by Qwen3 in Open WebUI. End-to-end working; retrieval accuracy "not
   completion check, or larger multivector batches (bounded by the ~32 MB
   request cap). Measure first with `INGEST_QUEUE_WORKERS=2` overlap — worker
   overlap may already hide most of it.
+- **Failed-job retry endpoint.** `POST /ingest/jobs/retry` (with an
+  `?error_contains=` filter) resubmitting persisted requests under their
+  original doc IDs. Deferred July 2026: the sidecar-outage burn that motivated
+  it was fixed at the source (transient requeue + backoff + compose
+  `service_healthy` gate), and full re-POSTs are idempotent — but selective
+  recovery beats a 3 h corpus re-render when something novel fails a batch.
 - **CI.** No `.github/workflows`; consider wiring `scripts/test.sh --all`.
 - **Merge** `feature/ingest-endpoint` → `main` once reviewed.
 

@@ -7,6 +7,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hayden.backend.qdrant.QdrantBackend;
+import org.hayden.ingest.SidecarUnavailableException;
 import org.hayden.ingest.IngestResult;
 import org.jboss.logging.Logger;
 
@@ -86,11 +87,31 @@ public class IngestWorker {
         LOG.info("Ingest worker stopped");
     }
 
+    /** Backoff window after a transient dependency failure: doubles from
+     *  MIN to MAX, resets on the first non-transient outcome. Without this,
+     *  a down sidecar lets a worker fast-fail the whole queue in seconds. */
+    static final long TRANSIENT_BACKOFF_MIN_MS = 5_000;
+    static final long TRANSIENT_BACKOFF_MAX_MS = 60_000;
+
     private void workerLoop() {
+        long backoffMs = 0;
         while (running.get()) {
             try {
                 Optional<IngestJob> next = queue.take(pollTimeoutMs, TimeUnit.MILLISECONDS);
-                next.ifPresent(this::processOne);
+                if (next.isEmpty()) {
+                    continue;
+                }
+                boolean transientFailure = processOne(next.get());
+                if (transientFailure) {
+                    backoffMs = backoffMs == 0
+                            ? TRANSIENT_BACKOFF_MIN_MS
+                            : Math.min(backoffMs * 2, TRANSIENT_BACKOFF_MAX_MS);
+                    LOG.warnf("Transient dependency failure; worker backing off %dms "
+                            + "(job requeued without retry penalty)", backoffMs);
+                    Thread.sleep(backoffMs);
+                } else {
+                    backoffMs = 0;
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
@@ -104,9 +125,11 @@ public class IngestWorker {
 
     /**
      * Process a single dequeued job. Public so tests can drive one iteration
-     * synchronously without thread-timing dances.
+     * synchronously without thread-timing dances. Returns true when the job
+     * hit a transient dependency failure (requeued, caller should back off);
+     * false on completion or permanent failure.
      */
-    public void processOne(IngestJob job) {
+    public boolean processOne(IngestJob job) {
         try {
             LOG.infof("Worker picking up job=%s kb=%s doc=%s (retry=%d)",
                     job.jobId(), job.request().kbName(), job.docId(), job.retryCount());
@@ -114,10 +137,17 @@ public class IngestWorker {
             queue.markCompleted(job.jobId(), result);
             LOG.infof("Worker completed job=%s chunks=%d pages=%d",
                     job.jobId(), result.chunkCount(), result.pageCount());
+            return false;
+        } catch (SidecarUnavailableException e) {
+            // Environment problem, not a job problem: back in line, no
+            // retry penalty, and the worker slows down until it clears.
+            queue.requeueTransient(job.jobId());
+            return true;
         } catch (Exception e) {
             String message = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
             LOG.warnf("Worker failed job=%s: %s", job.jobId(), message);
             queue.markFailed(job.jobId(), message);
+            return false;
         }
     }
 }

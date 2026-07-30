@@ -216,7 +216,10 @@ before the split, `kind == null`) → both pipelines as before. The agent polls
 `get_ingest_status(job_id)` to track progress.
 
 At-least-once on restart: any `IN_PROGRESS` job at startup is requeued
-(`retryCount++`) up to `ingest.queue.max_retries` (default 3). See
+(`retryCount++`) up to `ingest.queue.max_retries` (default 3). A sidecar-down
+failure mid-drain is transient, not terminal: the worker requeues the job with
+no retry penalty and backs off 5–60 s (`SidecarUnavailableException`); compose
+also gates `pdf-rag-http` on the sidecar's `service_healthy`. See
 [docs/components/ingest-queue.md](docs/components/ingest-queue.md) and
 [docs/plans/split-visual-ingest-v1.md](docs/plans/split-visual-ingest-v1.md).
 

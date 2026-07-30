@@ -103,10 +103,20 @@ new ───────────► QUEUED ──────────�
 `isTerminal()` returns true for `COMPLETED` and `FAILED`. Agents poll until
 `isTerminal() == true`.
 
-**Inline failures don't retry.** When the worker catches an
-exception (sidecar down, corrupt PDF, mode mismatch detected late), the job
+**Inline failures don't retry — with one exception.** When the worker
+catches an exception (corrupt PDF, mode mismatch detected late), the job
 moves straight to `FAILED`. Retries only happen on **crash recovery** —
 i.e., if the JVM dies mid-ingest, leaving the job in `IN_PROGRESS`.
+
+The exception is `SidecarUnavailableException` (sidecar down or still
+loading its model): that's an environment condition, not a job defect, so
+the worker calls `queue.requeueTransient(jobId)` — back to `QUEUED` with
+**no retryCount penalty** — and backs off (5 s doubling to 60 s, reset on
+the next non-transient outcome). Without this, a down sidecar fast-failed
+queued jobs at ~3 ms each and destroyed 130 real jobs during one restart
+window. Compose adds belt-and-braces: `pdf-rag-http` now waits on the
+sidecar's `service_healthy` (ready = model loaded), so a normal stack start
+can't race the model load at all.
 
 ## `IngestJob`
 
