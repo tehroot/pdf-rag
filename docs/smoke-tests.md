@@ -1,8 +1,7 @@
 # End-to-end smoke tests
 
-Run this against a live stack to verify everything is wired correctly. Each
-test is a copy-pasteable shell command sequence with expected output;
-deviation from the expected output is the failure mode to investigate.
+Run against a live stack. Each test is a copy-pasteable shell sequence with
+expected output; any deviation is the failure to investigate.
 
 The runbook assumes the **R530-style CPU-only deployment**: Qdrant +
 llama-server (bge-small) + ColPali sidecar (ColSmolVLM-500M, CPU) +
@@ -10,8 +9,6 @@ Quarkus MCP HTTP server, all in containers on a single host. Adjust env
 overrides for other topologies.
 
 ## Prerequisites
-
-Before running:
 
 1. `docker compose` is installed and running.
 2. `./models/bge-small-en-v1.5-f16.gguf` exists on disk:
@@ -113,8 +110,8 @@ on first ingest. As long as it's consistent, retrieval works.
 
 ### 1d. Quarkus MCP HTTP
 
-The MCP transport speaks Streamable HTTP (SSE + POST). The simplest smoke is
-a JSON-RPC frame against the `/mcp` endpoint:
+The MCP transport speaks Streamable HTTP (SSE + POST); the simplest smoke is
+a JSON-RPC frame against `/mcp`:
 
 ```bash
 # tools/list — should return the 7 @Tool methods we expose.
@@ -138,8 +135,7 @@ If `tools/list` returns `[]`, the Jandex index didn't pick up the `core` JAR
 
 ## Phase 2 — Tool-level smoke
 
-For the rest of this runbook, the `mcp_call` helper makes JSON-RPC tool calls
-ergonomic. Drop this into your shell:
+The rest of the runbook uses this `mcp_call` helper — drop it into your shell:
 
 ```bash
 mcp_call() {
@@ -215,14 +211,13 @@ mcp_call search_documents '{
 # }
 ```
 
-Notice `fusion_mode: "text_only"` because the KB has no visual index. The
-auto-mode fallback resolved correctly.
+`fusion_mode: "text_only"` — the KB has no visual index, so the auto-mode
+fallback resolved correctly.
 
 ### 2d. Build a multi-page PDF and ingest with visual indexing
 
-Quick fixture: a 3-page PDF assembled with `qpdf` from `/etc/hostname`-style
-content, or any PDF you have at hand. For something deterministic, use a
-Python one-liner if available:
+Fixture: any 3-page PDF (e.g. assembled with `qpdf`), or build a
+deterministic one with Python:
 
 ```bash
 python3 - <<'PY' > /tmp/smoke.pdf
@@ -328,7 +323,7 @@ mcp_call search_documents '{
 # }
 ```
 
-Things to confirm:
+Confirm:
 
 - `fusion_mode: "fusion"` (auto-mode resolved to fusion because visual is present)
 - Hits carry both `text_score` and `page_score` (proves the chunk-to-page join worked)
@@ -360,7 +355,7 @@ mcp_call inspect_page "$(jq -nc --arg d "$DOC_ID" '{
 # }
 ```
 
-If you want to actually view the PNG:
+To view the PNG:
 
 ```bash
 mcp_call inspect_page "$(jq -nc --arg d "$DOC_ID" '{kb_name:"smoke-visual",doc_id:$d,page_number:2}')" \
@@ -457,7 +452,7 @@ mcp_call search_documents '{
 # }
 ```
 
-Note: hits have no `text` (null) since this is pure visual retrieval.
+Hits have no `text` (null) — pure visual retrieval.
 
 ### 2j. Mode-mismatch hard rejection
 
@@ -556,8 +551,7 @@ docker compose start colpali-server
 
 ### 3c. Crash recovery — restart mid-ingest
 
-A more involved test; skip if not specifically interested in the queue
-recovery semantics.
+Skip unless you care about queue-recovery semantics.
 
 ```bash
 # Submit a long async ingest job:
@@ -613,9 +607,8 @@ You're done when:
 | `drop_visual_index` dry run + confirm both work | ✓ |
 | Sidecar-down query soft-degrades; sidecar-down ingest hard-fails | ✓ |
 
-If any line fails, the troubleshooting tree starts with that section's
-expected output — compare and read the relevant component walkthrough in
-`docs/components/`.
+If a line fails, compare against that section's expected output, then read
+the relevant component walkthrough in `docs/components/`.
 
 ## Common failures
 

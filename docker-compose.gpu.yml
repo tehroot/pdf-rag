@@ -35,6 +35,10 @@ services:
       COLPALI_MODEL: ${COLPALI_MODEL:-vidore/colqwen2-v1.0}
       COLPALI_DEVICE: ${COLPALI_DEVICE:-cuda}
       COLPALI_DTYPE: ${COLPALI_DTYPE:-bfloat16}
+      # 16 assumes a >=16 GB card (~5 GB bf16 ColQwen2 + ~0.25 GB/page
+      # activations). Must be >= the client's COLPALI_BATCH_SIZE below —
+      # the sidecar 400-rejects requests over this cap.
+      COLPALI_MAX_BATCH_SIZE: ${COLPALI_MAX_BATCH_SIZE:-16}
     deploy:
       resources:
         reservations:
@@ -47,7 +51,7 @@ services:
     environment:
       # GPU-host tuning (same ${VAR:-default} pattern — .env still wins).
       # Two queue workers overlap one job's CPU rasterizing with another's GPU
-      # embedding; batch 8 matches the CUDA sidecar's max_batch_size so client
-      # batches arrive GPU-sized instead of half-filled.
+      # embedding; the client batch matches the CUDA sidecar's
+      # COLPALI_MAX_BATCH_SIZE above so batches arrive GPU-sized.
       INGEST_QUEUE_WORKERS: ${INGEST_QUEUE_WORKERS:-2}
-      COLPALI_BATCH_SIZE: ${COLPALI_BATCH_SIZE:-8}
+      COLPALI_BATCH_SIZE: ${COLPALI_BATCH_SIZE:-16}

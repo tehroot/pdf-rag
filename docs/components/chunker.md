@@ -1,12 +1,11 @@
 # Chunker
 
 `core/src/main/java/org/hayden/backend/qdrant/Chunker.java` (~180 lines). The
-second step of the Qdrant pipeline — splits long extracted text into bounded,
-overlapping chunks suitable for embedding. **Each chunk carries the page
-range it came from**, which is what makes the chunk-to-page join in fusion
-work.
+second step of the Qdrant pipeline — splits extracted text into bounded,
+overlapping chunks for embedding. **Each chunk carries the page range it came
+from** — that's what makes the chunk-to-page join in fusion work.
 
-Pure logic, no I/O. Trivially testable and the most "tunable" piece of the
+Pure logic, no I/O — trivially testable, and the most tunable piece of the
 pipeline.
 
 This is the `sliding` strategy — the default (`ingest.chunk.strategy=sliding`)
@@ -22,9 +21,8 @@ A sliding-window chunker with three behaviors layered on top:
 1. **Bounded window.** Each chunk is at most `ingest.chunk.size-chars` long
    (default 1500).
 2. **Overlap.** Adjacent chunks share `ingest.chunk.overlap-chars` characters
-   (default 200) — so a query that hits text near a chunk boundary still has a
-   good chance of matching at least one chunk that contains the full
-   surrounding context.
+   (default 200) — so a query hitting text near a chunk boundary likely
+   matches at least one chunk containing the full surrounding context.
 3. **Boundary preference.** Within the back half of each window, the chunker
    prefers to break at a paragraph boundary (`\n\n`), then a sentence (`. `),
    then a newline, then a word boundary. Only if none of those exist does it
@@ -61,7 +59,7 @@ public record Chunk(int index, int startOffset, int endOffset, String text,
 public List<Chunk> chunk(String text);
 ```
 
-Returns `Chunk` records that retain enough context to be useful downstream:
+Each returned `Chunk` carries:
 
 - `index` — sequential, starting from 0.
 - `startOffset`, `endOffset` — character offsets in the (normalized) input.
@@ -104,8 +102,8 @@ on the source.
 
 ### Step 2: short-circuit
 
-If `norm.length() <= sizeChars`, return a single chunk and stop. The most
-common case (small inputs) avoids any loop at all.
+If `norm.length() <= sizeChars`, return a single chunk — the common
+small-input case never enters the loop.
 
 ### Step 3: sliding window
 
@@ -121,7 +119,7 @@ while (start < norm.length()) {
 }
 ```
 
-The last window always ends at `norm.length()` — no overlap-after-end nonsense.
+The last window always ends at `norm.length()`.
 
 The **forward-progress guard** (`next <= start`) handles the pathological case
 of a tiny chunk + big overlap: if subtracting `overlap` would push us back to
@@ -166,11 +164,10 @@ long single word) hard-cuts at `end`.
 
 ### Step 5: overlap
 
-After the chunk lands, `start = end - overlapChars`. The next chunk begins
-that many characters into the current chunk's end region, so the same text
-appears in two adjacent chunks. For a query that lands near a boundary
-(say, "rate limiting" where "rate" is in chunk N and "limiting" is in chunk
-N+1), at least one of the two chunks will contain the full phrase.
+After the chunk lands, `start = end - overlapChars`, so the same text appears
+in two adjacent chunks. For a query landing near a boundary (say, "rate
+limiting" where "rate" is in chunk N and "limiting" is in chunk N+1), at
+least one of the two chunks contains the full phrase.
 
 ## Failure modes
 
@@ -180,8 +177,8 @@ N+1), at least one of the two chunks will contain the full phrase.
 | `sizeChars <= 0` | `IngestException("ingest.chunk.size-chars must be > 0")` |
 | `overlapChars < 0` or `overlapChars >= sizeChars` | `IngestException("ingest.chunk.overlap-chars must satisfy 0 <= overlap < size ...")` |
 
-That's it. Within the valid config range, the chunker always terminates and
-always produces ≥ 1 chunk.
+Within the valid config range, the chunker always terminates and produces
+≥ 1 chunk.
 
 ## Why it's like this
 

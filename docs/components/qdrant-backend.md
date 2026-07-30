@@ -20,9 +20,6 @@ Three responsibilities:
    which handles `retrieval_mode` resolution, fallback, strategy selection,
    and confidence.
 
-The class itself is small — most of the real work happens in the injected
-collaborators.
-
 ## Interface
 
 ```java
@@ -138,8 +135,8 @@ public SearchResponse search(SearchRequest req) {
 }
 ```
 
-That's it. `FusionEngine` handles everything: mode resolution, calling the
-right pipelines, fusing, confidence, response shape. See
+`FusionEngine` handles everything: mode resolution, calling the right
+pipelines, fusing, confidence, response shape. See
 [fusion-engine.md](fusion-engine.md).
 
 ## List path
@@ -214,7 +211,7 @@ New (visual orchestration):
 - `ingest_modeMismatch_existingTextOnlyKb_throws`.
 - `ingest_visualRequested_sidecarDown_hardFails`.
 
-The `newBackendWithVisual` helper is involved — it wires real
-`PageRasterizer`, real `TextLayerProbe`, real `FilesystemPageImageStore` (tmp
-dir), real `ColPaliClient` (against WireMock), and `ColPaliPipeline`
-composed of them. But no live services needed.
+The `newBackendWithVisual` helper is involved — it wires a real
+`PageRasterizer`, `TextLayerProbe`, `FilesystemPageImageStore` (tmp dir), and
+`ColPaliClient` (against WireMock) into a composed `ColPaliPipeline`. No live
+services needed.

@@ -110,9 +110,8 @@ Step-by-step:
    scanning), and b) more accurate when the content-type is more specific
    than what bytes alone reveal (e.g. distinguishing OOXML variants).
 2. **`BodyContentHandler(maxChars)` instead of the no-arg constructor.** The
-   no-arg version uses Tika's 100 000-char default — silent truncation, often
-   without any obvious sign in the extracted text. The explicit cap is
-   load-bearing.
+   no-arg version uses the 100 000-char default — silent truncation (see
+   above). The explicit cap is load-bearing.
 3. **`AutoDetectParser`.** Tika's umbrella parser that delegates to format-
    specific parsers via SPI. With `tika-parsers-standard-package` on the
    classpath, that includes PDFBox (PDF), POI (DOCX/XLSX/PPTX), Jericho (HTML),
@@ -120,12 +119,11 @@ Step-by-step:
 4. **`new ParseContext()` (empty).** No nested-document handler, no OCR config
    tweaks. If you want OCR or recursive parsing later, this is the parameter
    that gets configured.
-5. **Empty output is a failure.** Tika returning an empty string means either
-   (a) the file format isn't supported (no parser claimed it), or (b) the file
-   is corrupted / actually empty. Either way, propagating an empty string to
-   the chunker would produce zero chunks and confuse downstream consumers — so
-   we throw `IngestException` here with the filename + content-type, which is
-   usually enough to diagnose.
+5. **Empty output is a failure.** Empty text means either the format isn't
+   supported (no parser claimed it) or the file is corrupted / actually empty.
+   Propagating it would produce zero chunks downstream, so we throw
+   `IngestException` with the filename + content-type — usually enough to
+   diagnose.
 
 ## Failure modes
 
@@ -138,10 +136,9 @@ Step-by-step:
 
 ## Why it's like this
 
-- **`AutoDetectParser` instead of per-format parsers.** We could `new
-  PDFParser()` for PDFs, etc., but Tika's strength is *not having to know* —
-  the agent passes a URL, we pass bytes through, Tika finds the right parser.
-  Adding DOCX/HTML/etc. costs nothing.
+- **`AutoDetectParser` instead of per-format parsers.** Tika's strength is
+  *not having to know* — the agent passes a URL, we pass bytes through, Tika
+  finds the right parser. Adding DOCX/HTML/etc. costs nothing.
 - **Hand the filename + content-type as metadata.** Tika's `Metadata.CONTENT_TYPE`
   short-circuits magic-byte detection when set; `TikaCoreProperties.RESOURCE_NAME_KEY`
   (the renamed-in-3.x version of `Metadata.RESOURCE_NAME_KEY`) does the same
@@ -171,12 +168,11 @@ Step-by-step:
 - `emptyInput_throws` — empty bytes raise `IngestException`.
 
 PDF extraction is covered by the live smoke-test path in
-[../deployment.md](../deployment.md) rather than a unit test — packaging a
-minimal valid PDF as a fixture works but adds binary blobs to the repo. Tika's
-own test suite covers the format parsers; we're only verifying our wiring of
-metadata hints + `BodyContentHandler` + empty-output guard, which the two
-text-based tests demonstrate.
+[../deployment.md](../deployment.md) rather than a unit test — a PDF fixture
+would add binary blobs to the repo. Tika's own suite covers the format
+parsers; we only verify our wiring (metadata hints + `BodyContentHandler` +
+empty-output guard), which the text-based tests demonstrate.
 
-If you ever need PDF coverage in CI, the cheapest path is to generate a tiny
-PDF on the fly with PDFBox (`PDDocument` + a single page with one text
-string), which avoids checking in a binary fixture.
+If you need PDF coverage in CI, generate a tiny PDF on the fly with PDFBox
+(`PDDocument` + a single page with one text string) — no binary fixture
+needed.

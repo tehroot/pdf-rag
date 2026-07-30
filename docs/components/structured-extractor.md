@@ -26,7 +26,7 @@ The `headingPath` is the load-bearing output: it's what lets
 [StructuralChunker](structural-chunker.md) prepend a
 `"Install > Cooling"` breadcrumb to each chunk's embedded text.
 
-Two completely different extraction paths converge on the same `Block` shape:
+Two different extraction paths converge on the same `Block` shape:
 
 ```mermaid
 flowchart TD

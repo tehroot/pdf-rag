@@ -3,8 +3,8 @@
 ## Goal
 
 Give an LLM agent two MCP tool calls — `ingest_document` and `search_documents` —
-plus an `inspect_page` escape hatch, that together let it write to and query
-a multimodal RAG store without having to know about chunking, embedding,
+plus an `inspect_page` escape hatch, that let it write to and query
+a multimodal RAG store without knowing about chunking, embedding,
 vector storage, or the difference between text-pipeline and visual-pipeline
 retrieval.
 
@@ -28,7 +28,7 @@ pdf-rag-ingest/
 ├── pom.xml                 parent (multi-module, dependencyManagement only)
 ├── core/                   ALL Java logic + ALL Java tests. No transport.
 │   └── src/main/java/org/hayden/
-│       ├── tools/IngestTools.java        MCP surface (5 @Tool methods)
+│       ├── tools/IngestTools.java        MCP surface (8 @Tool methods)
 │       ├── ingest/
 │       │   ├── IngestService.java        dispatcher: name → Backend
 │       │   ├── IngestRequest / SearchRequest         tool inputs
@@ -82,8 +82,8 @@ pdf-rag-ingest/
 ### Why three Java modules
 
 `quarkiverse-mcp-server` ships stdio and Streamable HTTP transports as
-**separate, mutually-exclusive Maven artifacts**. A single Quarkus build can
-only pull one of them. We resolve this with the three-module layout:
+**separate, mutually-exclusive Maven artifacts** — a single Quarkus build can
+pull only one. Hence the three-module layout:
 
 1. Every CDI bean — including `@Tool` methods — lives in `core`, which depends
    only on `quarkus-mcp-server-core` (no transport).
@@ -93,8 +93,8 @@ only pull one of them. We resolve this with the three-module layout:
    `quarkus.index-dependency.core.*` so Quarkus's Arc indexes `core`'s
    classes at build time.
 
-**Operational rule:** to add or change a tool or a backend, edit `core/` only.
-Both transports pick it up via CDI; the transport modules need no changes.
+**Operational rule:** to add or change a tool or a backend, edit `core/` only;
+both transports pick it up via CDI.
 
 ### Why the Python sidecar lives in this repo
 
@@ -121,7 +121,7 @@ public SearchResponse search(SearchRequest req) { return pick(req.backend()).sea
 ```
 
 `pick()` matches `Backend.name()` (case-insensitive). Unknown names fail fast
-with a useful error listing the known backends. `list_knowledge_bases` is the
+with an error listing the known backends. `list_knowledge_bases` is the
 one tool that can fan out to *all* backends and merge the result.
 
 ## Qdrant backend — two pipelines
@@ -165,7 +165,7 @@ exists ↔ visual indexing is enabled for that KB. No separate metadata store.
 
 - **Per-call**: `enable_visual_index` arg on `ingest_document`.
 - **Per-deployment**: `INGEST_DEFAULT_VISUAL_INDEX` env (default `true`).
-- **Mode-mismatched ingest on existing KB**: hard-reject with a clear "create
+- **Mode-mismatched ingest on existing KB**: hard-reject with a "create
   a new KB or change the arg" message. No `force_mode_change` in v1.
 
 ### Sidecar-down behavior
@@ -179,13 +179,18 @@ Asymmetric:
 ### Async ingest routing
 
 `QdrantBackend.ingest` checks `shouldQueue(file, visualRequested)` before
-running. Large PDFs (page count ≥ `ingest.queue.sync_threshold_pages`,
-default 20) with visual indexing enabled get queued via `IngestQueue`; the
-`IngestWorker` thread pool drains the queue in the background. The agent
-gets back `IngestResult.queued{jobId, "queued", 0 chunks}` immediately and
-polls `get_ingest_status(jobId)` until terminal.
+running. For large PDFs (page count ≥ `ingest.queue.sync_threshold_pages`,
+default 20) with visual indexing enabled, the ingest **splits**: the text
+pipeline runs synchronously (the doc is text-searchable immediately) and only
+the visual half is queued as a `JobKind.VISUAL` job; `<kb>_pages` is created
+eagerly so the visual-capability flag stays truthful while jobs drain. The
+agent gets back `IngestResult.queuedVisual{jobId, "queued", N chunks,
+0 pages}` and polls `get_ingest_status(jobId)` until terminal. The
+`IngestWorker` thread pool drains the queue, dispatching on
+`job.effectiveKind()` (legacy `FULL` jobs persisted before the split run both
+pipelines).
 
-Text-only ingests and small PDFs run synchronously (existing behavior).
+Text-only ingests and small PDFs run fully synchronously.
 
 Queue state persists to `${INGEST_QUEUE_PATH}/<jobId>.json`. On JVM restart,
 `IN_PROGRESS` jobs requeue with `retryCount++` (capped at

@@ -119,17 +119,14 @@ S3 lands the check moves to a factory.
 - **`store` returns the key.** Callers don't construct keys; they accept
   whatever the store returns. Lets future impls use different formats
   (S3 object keys, content-addressable hashes, etc.) without API change.
-- **Atomic writes.** Cheap (one extra rename). Avoids a small but real class
-  of concurrent-reader bugs.
 - **Sanitization.** kbName and docId originate from user-controlled input;
   treating them as raw filesystem path components is a path-traversal risk.
   The sanitizer rejects rather than silently rewriting — explicit failure is
   preferable to ambiguous behavior.
-- **`retrieve` returns null instead of throwing.** The "missing file" case
-  isn't exceptional — it happens when a KB is dropped or when a page image
-  is manually removed for cleanup. The tool layer turns missing into a
-  human-readable error message; throwing here would just shift that to the
-  catch-rethrow pattern everywhere.
+- **`retrieve` returns null instead of throwing.** Missing files aren't
+  exceptional — KBs get dropped, images get manually cleaned up. The tool
+  layer turns missing into a human-readable error; throwing here would just
+  shift that to a catch-rethrow pattern everywhere.
 
 ## Tests
 
@@ -150,5 +147,5 @@ cleans it up.
 - Backend name is reported correctly.
 - Page numbers are zero-padded to six digits.
 
-The path-traversal test is particularly load-bearing — making sure a
-malicious key can't walk outside root is the security property.
+The path-traversal test is load-bearing — a malicious key must not walk
+outside root; that's the security property.
