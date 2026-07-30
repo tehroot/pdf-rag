@@ -137,6 +137,17 @@ public class IngestQueue {
         });
     }
 
+    /**
+     * Put a job back in line after a transient infrastructure failure (e.g.
+     * the ColPali sidecar is down). Unlike {@link #markFailed}, this carries
+     * no retry penalty: the condition belongs to the environment, not the
+     * job, so it must not consume the crash-recovery retry budget.
+     */
+    public void requeueTransient(String jobId) {
+        update(jobId, job -> job.withStatus(JobStatus.QUEUED));
+        pending.offer(jobId);
+    }
+
     /** Number of jobs awaiting a worker. Useful for backpressure and tests. */
     public int pendingCount() {
         return pending.size();

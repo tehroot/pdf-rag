@@ -105,6 +105,17 @@ services:
       # re-fetch multi-GB checkpoints.
       - hf-cache:/root/.cache/huggingface
     restart: unless-stopped
+    # Overrides the Dockerfile healthcheck only to stretch start_period:
+    # first boot downloads a multi-GB checkpoint from HF, and pdf-rag-http
+    # now waits for service_healthy — an "unhealthy" verdict during a slow
+    # first download would block the whole stack. Failures inside
+    # start_period don't count; ready:true flips healthy immediately.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys,json; d=json.loads(urllib.request.urlopen('http://localhost:8090/healthz',timeout=4).read()); sys.exit(0 if d.get('ready') else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15m
     # For GPU acceleration, layer in docker-compose.gpu.yml — see that file
     # for the host-side prerequisites and activation commands.
 
@@ -118,8 +129,11 @@ services:
         condition: service_healthy
       llama-server:
         condition: service_healthy
+      # service_healthy = model loaded (sidecar reports ready:true), so a
+      # stack restart can't start draining visual jobs against a sidecar
+      # that's still loading — that fast-failed 130 queued jobs once.
       colpali-server:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "${PDF_RAG_PORT:-8080}:8080"
     environment:

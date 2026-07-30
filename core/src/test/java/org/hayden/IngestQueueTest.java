@@ -115,6 +115,22 @@ class IngestQueueTest {
     }
 
     @Test
+    void requeueTransient_returnsToQueued_withoutRetryPenalty_andPersists() throws Exception {
+        IngestJob job = queue.submit(IngestJob.queuedVisual(sampleRequest("kb"), "doc-1"));
+        IngestJob taken = queue.take(100, TimeUnit.MILLISECONDS).orElseThrow();
+
+        queue.requeueTransient(job.jobId());
+
+        IngestJob requeued = queue.getJob(job.jobId()).orElseThrow();
+        assertThat(requeued.status()).isEqualTo(JobStatus.QUEUED);
+        assertThat(requeued.retryCount()).isEqualTo(taken.retryCount());
+        // Back in the pending line and takeable again.
+        IngestJob retaken = queue.take(100, TimeUnit.MILLISECONDS).orElseThrow();
+        assertThat(retaken.jobId()).isEqualTo(job.jobId());
+        assertThat(retaken.status()).isEqualTo(JobStatus.IN_PROGRESS);
+    }
+
+    @Test
     void markFailed_transitionsAndAttachesError() throws Exception {
         IngestJob job = queue.submit(IngestJob.queued(sampleRequest("kb"), "doc-1"));
         queue.take(100, TimeUnit.MILLISECONDS);

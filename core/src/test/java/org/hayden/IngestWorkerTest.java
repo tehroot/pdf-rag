@@ -7,6 +7,7 @@ import org.hayden.ingest.IngestException;
 import org.hayden.ingest.IngestRequest;
 import org.hayden.ingest.IngestRequest.SourceType;
 import org.hayden.ingest.IngestResult;
+import org.hayden.ingest.SidecarUnavailableException;
 import org.hayden.jobs.IngestJob;
 import org.hayden.jobs.IngestQueue;
 import org.hayden.jobs.IngestWorker;
@@ -95,11 +96,38 @@ class IngestWorkerTest {
         IngestJob taken = takeOrFail();
 
         fake.nextException = new RuntimeException("disk full");
-        worker.processOne(taken);
+        boolean transientFailure = worker.processOne(taken);
 
+        assertThat(transientFailure).isFalse();
         IngestJob failed = queue.getJob(job.jobId()).orElseThrow();
         assertThat(failed.status()).isEqualTo(JobStatus.FAILED);
         assertThat(failed.error()).contains("disk full");
+    }
+
+    @Test
+    void processOne_sidecarUnavailable_requeuesWithoutRetryPenalty() {
+        IngestJob job = queue.submit(IngestJob.queuedVisual(req("kb"), "doc-1"));
+        IngestJob taken = takeOrFail();
+
+        fake.nextException = new SidecarUnavailableException("sidecar loading");
+        boolean transientFailure = worker.processOne(taken);
+
+        // Signals backoff, job is back in line as QUEUED, and the crash-
+        // recovery retry budget is untouched. This is the guard against a
+        // down sidecar fast-failing the whole queue (130 real jobs, once).
+        assertThat(transientFailure).isTrue();
+        IngestJob requeued = queue.getJob(job.jobId()).orElseThrow();
+        assertThat(requeued.status()).isEqualTo(JobStatus.QUEUED);
+        assertThat(requeued.retryCount()).isEqualTo(taken.retryCount());
+        assertThat(queue.pendingCount()).isEqualTo(1);
+
+        // Sidecar back: the same job drains normally on the next pass.
+        fake.nextException = null;
+        fake.nextResult = new IngestResult("qdrant", "kb", "kb", "doc-1",
+                "completed", 0, 7, true, "done", List.of(), null);
+        assertThat(worker.processOne(takeOrFail())).isFalse();
+        assertThat(queue.getJob(job.jobId()).orElseThrow().status())
+                .isEqualTo(JobStatus.COMPLETED);
     }
 
     @Test

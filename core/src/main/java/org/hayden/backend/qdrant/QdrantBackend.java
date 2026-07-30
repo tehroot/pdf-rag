@@ -16,6 +16,7 @@ import org.hayden.ingest.IngestRequest;
 import org.hayden.ingest.IngestResult;
 import org.hayden.ingest.SearchRequest;
 import org.hayden.ingest.SearchResponse;
+import org.hayden.ingest.SidecarUnavailableException;
 import org.hayden.jobs.IngestJob;
 import org.hayden.jobs.IngestQueue;
 import org.hayden.jobs.JobKind;
@@ -138,7 +139,7 @@ public class QdrantBackend implements Backend {
         boolean visualRequested = resolveVisualIndexEnabled(req);
         validateModeConsistency(req.kbName(), visualRequested);
         if (visualRequested && !pages.sidecarHealthy()) {
-            throw new IngestException(
+            throw new SidecarUnavailableException(
                     "Visual index requested for KB '" + req.kbName()
                             + "' but the ColPali sidecar is unreachable.");
         }
@@ -152,7 +153,7 @@ public class QdrantBackend implements Backend {
      */
     private IngestResult doVisualIngest(IngestRequest req, FetchedFile file, String docId) {
         if (!pages.sidecarHealthy()) {
-            throw new IngestException(
+            throw new SidecarUnavailableException(
                     "Visual job for KB '" + req.kbName()
                             + "' but the ColPali sidecar is unreachable.");
         }
