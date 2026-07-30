@@ -8,6 +8,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hayden.ingest.IngestException;
+import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.net.URI;
@@ -33,6 +34,8 @@ import java.util.List;
  */
 @ApplicationScoped
 public class Embedder {
+
+    private static final Logger LOG = Logger.getLogger(Embedder.class);
 
     @ConfigProperty(name = "ingest.embed.base-url")
     String baseUrl;
@@ -83,6 +86,59 @@ public class Embedder {
     }
 
     private List<float[]> embedBatch(List<String> batch) {
+        Attempt attempt = requestEmbeddings(batch);
+        if (attempt.vectors != null) {
+            return attempt.vectors;
+        }
+        // One input in the batch busted the model's token cap (llama-server:
+        // "input (N tokens) is too large to process"). The server doesn't say
+        // WHICH input, so isolate per input and truncate only the offenders.
+        LOG.warnf("Embedding batch of %d rejected as too large; isolating per input (%s)",
+                batch.size(), attempt.error);
+        List<float[]> out = new ArrayList<>(batch.size());
+        for (String input : batch) {
+            out.add(embedWithTruncation(input));
+        }
+        return out;
+    }
+
+    /**
+     * Embed one input, progressively truncating on token-cap overflow. Dense
+     * technical text (part tables, OCR debris) can tokenize under 1.4 chars per
+     * token, so a chunk sized comfortably in characters can still exceed the
+     * encoder's hard cap (512 tokens for bge-*). Only the embedding input is
+     * clipped — the stored chunk text is untouched, and the encoder couldn't
+     * attend past its cap anyway.
+     */
+    private float[] embedWithTruncation(String input) {
+        String candidate = input;
+        while (true) {
+            Attempt attempt = requestEmbeddings(List.of(candidate));
+            if (attempt.vectors != null) {
+                if (candidate.length() < input.length()) {
+                    LOG.warnf("Embedded truncated input (%d of %d chars): \"%.60s…\"",
+                            candidate.length(), input.length(), input);
+                }
+                return attempt.vectors.get(0);
+            }
+            if (candidate.length() <= MIN_TRUNCATED_CHARS) {
+                throw new IngestException("Input still rejected as too large at "
+                        + candidate.length() + " chars: " + attempt.error);
+            }
+            candidate = candidate.substring(0, (int) (candidate.length() * TRUNCATE_FACTOR));
+        }
+    }
+
+    /** Result of one embeddings call: vectors on success, or the server's
+     *  error text when it rejected an input as over the token cap. Any other
+     *  failure throws from {@link #requestEmbeddings}. */
+    private record Attempt(List<float[]> vectors, String error) {
+    }
+
+    private static final double TRUNCATE_FACTOR = 0.75;
+    private static final int MIN_TRUNCATED_CHARS = 100;
+
+    private Attempt requestEmbeddings(List<String> batch) {
         byte[] body;
         try {
             body = objectMapper.writeValueAsBytes(new EmbedRequest(model, batch));
@@ -110,8 +166,12 @@ public class Embedder {
             throw new IngestException("Interrupted calling embeddings endpoint", e);
         }
         if (resp.statusCode() / 100 != 2) {
+            String respBody = new String(resp.body(), StandardCharsets.UTF_8);
+            if (isInputTooLarge(respBody)) {
+                return new Attempt(null, respBody);
+            }
             throw new IngestException("Embeddings endpoint returned HTTP " + resp.statusCode()
-                    + ": " + new String(resp.body(), StandardCharsets.UTF_8));
+                    + ": " + respBody);
         }
 
         EmbedResponse parsed;
@@ -130,7 +190,14 @@ public class Embedder {
         for (EmbedResponse.Item item : parsed.data) {
             out.add(toFloatArray(item.embedding));
         }
-        return out;
+        return new Attempt(out, null);
+    }
+
+    /** llama-server phrasing plus the OpenAI-style equivalent. */
+    private static boolean isInputTooLarge(String errorBody) {
+        return errorBody != null
+                && (errorBody.contains("too large to process")
+                    || errorBody.contains("maximum context length"));
     }
 
     public String model() {

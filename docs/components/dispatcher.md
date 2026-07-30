@@ -36,8 +36,8 @@ public interface Backend {
 }
 ```
 
-That's the entire contract. Four methods, two of which produce records the
-tool layer surfaces verbatim to MCP.
+Four methods, two of which produce records the tool layer surfaces verbatim
+to MCP.
 
 Convention: `name()` returns lowercase. `Backend` implementations are
 `@ApplicationScoped` CDI beans and get picked up automatically by the
@@ -82,16 +82,12 @@ public class IngestService {
 3. If nothing matches, throw `IngestException("Unknown backend 'X' (known: ...)")`
    — the list of registered backends is included so the error is actionable.
 
-The match is `equalsIgnoreCase`, so the agent can pass `"Qdrant"` or `"QDRANT"`
-and it still works.
-
 ### CDI `Instance<Backend>`
 
 `@Inject Instance<Backend>` is how CDI hands you "all beans that implement this
 interface". It's not a `List` — it's a lazy iterable that re-resolves per call,
-which means a Backend implementation added later (e.g. for tests) shows up
-without restarting CDI. We iterate with the enhanced-for loop; performance is
-fine because the registry is small (two entries today).
+so a Backend implementation added later (e.g. for tests) shows up without
+restarting CDI. Iteration cost is moot at two registered backends.
 
 ### Merge mode for `list_knowledge_bases`
 

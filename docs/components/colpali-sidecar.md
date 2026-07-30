@@ -1,8 +1,8 @@
 # ColPali sidecar (Python)
 
-`sidecar/` — a separate Python project, lives in this repo as a subdirectory.
-A small FastAPI service that wraps a ColVision model (ColPali / ColQwen2 /
-ColSmolVLM / ColFlor) behind the HTTP contract the Java side expects.
+`sidecar/` — a separate Python project in this repo. A FastAPI service
+wrapping a ColVision model (ColPali / ColQwen2 / ColSmolVLM / ColFlor)
+behind the HTTP contract the Java side expects.
 
 The Java side is **model-agnostic** via `/info` — switching models or
 sidecar implementations (PyTorch / ONNX / llama.cpp) is a deploy-time
@@ -127,8 +127,8 @@ Response:
 { "status": "ok", "ready": true }
 ```
 
-`ready: false` while the model is still loading at startup (which can take
-minutes for ColQwen2 on a cold cache).
+`ready: false` while the model is still loading at startup (minutes for
+ColQwen2 on a cold cache).
 
 ## Internal architecture
 
@@ -152,8 +152,7 @@ Two implementations:
   `colpali_engine`. Wraps the actual ColVision model. Loading takes
   ~minutes for ColQwen2-2B on cold cache.
 - `FakeModelHandle` (in `tests/fakes.py`) — synthetic vectors shaped like
-  ColPali output. Used by every test so we don't need torch / a real model
-  to run unit tests.
+  ColPali output. Used by every test — no torch / real model needed.
 
 ### Model-class registry
 
@@ -280,8 +279,7 @@ The wire shape (`/info`) is identical regardless — the Java side adapts.
   today — `colpali-engine` + `transformers` + `torch`. Embedding it directly
   in the JVM is impractical. A small HTTP service is the clean separation.
 - **Model-agnostic wire shape.** `/info` lets the Java side adapt to whatever
-  model the operator chose. Switching from ColPali to ColQwen2 to
-  ColSmolVLM doesn't require recompiling the Java side.
+  model the operator chose — swapping models needs no Java recompile.
 - **Lazy torch imports.** `model.py` only imports torch when
   `RealModelHandle.__init__` runs. The bootstrap test path runs without ML
   deps installed; only deploy-time needs the full `[ml]` extras.
@@ -291,9 +289,6 @@ The wire shape (`/info`) is identical regardless — the Java side adapts.
 - **Pooling in pure Python.** `pooling.py` doesn't need torch — it's
   list-of-lists arithmetic. Lets us unit-test the pooling math in isolation
   with simple fixtures.
-- **CPU torch from a separate index.** Pinning to `--index-url
-  download.pytorch.org/whl/cpu` in the CPU Dockerfile keeps the image from
-  pulling multi-GB CUDA wheels we don't need.
 
 ## Tests
 

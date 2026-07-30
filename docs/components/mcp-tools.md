@@ -256,7 +256,7 @@ Dry-run (default, `confirm=false`):
 }
 ```
 
-If the KB has no visual index, returns a clear no-op:
+If the KB has no visual index, returns a no-op:
 
 ```json
 {
@@ -351,9 +351,8 @@ JSON-RPC error responses; agents see structured failures rather than hangs.
   read images can recover.
 - **Per-call mode overrides.** Both `enable_visual_index` and
   `retrieval_mode` can be set per call (override env defaults). Lets an
-  agent dynamically pick: "use text-only for this fast lookup" vs "use
-  fusion for this hard one." Most agents won't bother and will use the
-  defaults.
+  agent pick: "use text-only for this fast lookup" vs "use fusion for this
+  hard one." Most agents won't bother and will use the defaults.
 
 ## Tests
 

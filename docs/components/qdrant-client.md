@@ -6,7 +6,7 @@ same pattern as `Embedder`, `ColPaliClient`, and `OpenWebUiClient`.
 
 ## What it does
 
-Twelve public methods covering the endpoints both pipelines need:
+Fourteen public methods covering the endpoints both pipelines need:
 
 | Method | Endpoint | Use |
 |--------|----------|-----|
@@ -16,6 +16,7 @@ Twelve public methods covering the endpoints both pipelines need:
 | `ensureCollection(name, dim)` | get + create | Idempotent helper; rejects dim mismatch. |
 | `deleteCollection(name)` | `DELETE /collections/{name}` | Idempotent on 404. |
 | `deleteByDocId(coll, docId)` | `POST /collections/{name}/points/delete?wait=true` | Filtered delete on the indexed `doc_id`; false on 404. Backs replace-on-reingest + document deletion. |
+| `countDocuments(coll)` | `POST /collections/{name}/facet` | Distinct `doc_id` count (exact, saturates at 10k); null on 404. Backs `/kb` document counts. |
 | `ensurePayloadIndexes(coll, fields)` | `GET` + `PUT /collections/{name}/index?wait=true` | Diff `payload_schema`, create only missing indexes. See below. |
 | `upsertPoints(coll, points)` | `PUT /collections/{name}/points?wait=true` | Single-vector upsert. |
 | `search(coll, vec, topK, filter)` | `POST /collections/{name}/points/search` | Single-vector ANN search with optional payload filter. |
@@ -24,7 +25,7 @@ Twelve public methods covering the endpoints both pipelines need:
 | **`upsertMultivectorPoints(coll, points)`** | `PUT /collections/{name}/points?wait=true` | Multivector upsert with `{name: float[][]}` per point. |
 | **`queryMultistage(coll, prefetches, rerank, query, limit, filter)`** | `POST /collections/{name}/points/query` | Prefetch + rerank multistage query. |
 
-Bold = added for the visual pipeline. Earlier methods are unchanged.
+Bold = added for the visual pipeline.
 
 ## Configuration
 
@@ -43,7 +44,7 @@ Empty for local; set for Qdrant Cloud.
 
 ## Single-vector ops (text pipeline)
 
-Unchanged from earlier. See [original-style docs] for the basic shapes:
+Basic shapes:
 
 - `createCollection(name, dim)` → `PUT /collections/{name}` body
   `{"vectors": {"size": dim, "distance": "Cosine"}}`
@@ -261,14 +262,13 @@ across versions.
 - **Plain `HttpClient` over qdrant-java-client.** Same as everywhere else.
   Smaller dep surface, easier to mock with WireMock, easier to reason about
   HTTP shapes.
-- **Multivector methods separate from single-vector.** Could try to unify
-  them at the API level, but the wire shapes are different enough (named
-  vectors as objects vs single vector as array) that two surfaces is
-  clearer than one with type-dispatched branches.
-- **Preset factories on `MultiVectorConfig`.** Manually building the named
-  vector config every time would be error-prone (HNSW config, quantization
-  config, distance, comparator all have to line up). The two presets
-  cover 99% of the ColPali use case.
+- **Multivector methods separate from single-vector.** The wire shapes
+  differ enough (named vectors as objects vs single vector as array) that
+  two surfaces are clearer than one with type-dispatched branches.
+- **Preset factories on `MultiVectorConfig`.** Hand-building the named
+  vector config is error-prone (HNSW config, quantization config, distance,
+  comparator all have to line up). The two presets cover 99% of the ColPali
+  use case.
 - **`wait=true` everywhere.** Synchronous semantics. Async upsert is faster
   but creates a subtle race where a search immediately after upsert may
   miss the new points.
@@ -276,7 +276,7 @@ across versions.
   as success.** Asymmetric on purpose: callers of `getCollection` want to
   know "exists or not"; callers of `deleteCollection` want "ensure not".
 - **HTTP/1.1 pinned.** Qdrant itself speaks HTTP/2 fine on the REST port,
-  but we pin for consistency with the rest of the project and to insure
+  but we pin for consistency with the rest of the project and to guard
   against a future reverse-proxy deployment that doesn't grok h2c.
 
 ## Tests

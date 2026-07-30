@@ -4,7 +4,7 @@
 Where Qdrant means "we own the RAG", Open WebUI means "we hand a raw file
 to Open WebUI and let it do extraction + chunking + embedding + storage".
 
-The four classes that make it work:
+The pieces:
 
 | File | Role |
 |------|------|
@@ -64,9 +64,9 @@ public class OpenWebUiBackend implements Backend {
 }
 ```
 
-The `getFileStatus(fileId)` method is the one tool entry that bypasses the
-dispatcher — the `get_file_status` MCP tool injects `OpenWebUiBackend`
-directly because the operation is backend-specific.
+`getFileStatus(fileId)` is the one tool entry that bypasses the dispatcher —
+the `get_file_status` MCP tool injects `OpenWebUiBackend` directly because
+the operation is backend-specific.
 
 ### `OpenWebUiClient`
 
@@ -104,9 +104,8 @@ public KnowledgeBase findOrCreate(String name, String description) {
 }
 ```
 
-Linear scan. KB lists are tiny (single-digit to low-double-digit in normal
-use), so this is fine. Case-sensitive equality — `"Docs"` and `"docs"` are
-different KBs.
+Linear scan — KB lists are tiny (single-digit to low-double-digit in normal
+use). Case-sensitive equality — `"Docs"` and `"docs"` are different KBs.
 
 `GET /api/v1/knowledge/` returns `{items: [...], total: N}`. **Critical:**
 many Open WebUI docs and discussion threads show this endpoint returning a
@@ -152,17 +151,16 @@ public ProcessStatus waitUntilProcessed(String fileId, Duration timeout) {
 ```
 
 Backoff sequence: 200, 400, 800, 1600, 2000, 2000, 2000, … Most small files
-complete after 1-2 polls. Default timeout (passed via the tool's
-`poll_timeout_seconds`, default 300) is generous enough for embedding-heavy
-pipelines on large docs.
+complete after 1-2 polls. Default timeout (the tool's `poll_timeout_seconds`,
+default 300) covers embedding-heavy pipelines on large docs.
 
 ### Step 5: attach to KB (`OpenWebUiClient.addFileToKnowledgeBase`)
 
 `POST /api/v1/knowledge/{kbId}/file/add` with body `{"file_id": "..."}`.
 
-The crucial detail: this must come *after* step 4 sees `completed`. If you
-call this while Open WebUI's status is still `pending`, you get
-`400 "The content provided is empty"`. The poll loop is the guard.
+This must come *after* step 4 sees `completed`. Calling it while Open WebUI's
+status is still `pending` gets `400 "The content provided is empty"`. The
+poll loop is the guard.
 
 If status comes back `failed`, we skip step 5 entirely and report the failure
 in `IngestResult.message`.
@@ -178,9 +176,8 @@ this.http = HttpClient.newBuilder()
 
 Same HTTP/1.1 pin as everywhere else. Open WebUI's uvicorn rejects the
 cleartext `h2c` upgrade with `400 Invalid HTTP request received` *before*
-reading the body — your multipart upload fails before Open WebUI even
-parses it. This was the most surprising debugging session in the project's
-history.
+reading the body — the multipart upload fails before Open WebUI even
+parses it.
 
 ### Bearer auth
 

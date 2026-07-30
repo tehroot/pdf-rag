@@ -103,7 +103,7 @@ new ───────────► QUEUED ──────────�
 `isTerminal()` returns true for `COMPLETED` and `FAILED`. Agents poll until
 `isTerminal() == true`.
 
-**Important nuance: inline failures don't retry.** When the worker catches an
+**Inline failures don't retry.** When the worker catches an
 exception (sidecar down, corrupt PDF, mode mismatch detected late), the job
 moves straight to `FAILED`. Retries only happen on **crash recovery** —
 i.e., if the JVM dies mid-ingest, leaving the job in `IN_PROGRESS`.
@@ -312,9 +312,9 @@ Returns the full `IngestJob` record. Agents poll until
   persistence (a 100 MB PDF in a JSON file). Re-fetching is fast for path
   and inline sources; URL sources accept the "URL must still resolve"
   constraint. vNext could add an optional bytes-cache for URL jobs.
-- **Sync path for small ingests.** Not every ingest needs to queue. Small
-  born-digital PDFs and text-only ingests finish in seconds; making the
-  agent poll for those would add latency. The page-count heuristic catches
+- **Sync path for small ingests.** Small born-digital PDFs and text-only
+  ingests finish in seconds; making the agent poll for those would add
+  latency. The page-count heuristic catches
   the "this will be slow" case automatically.
 - **`@Startup` for the worker.** Without it, the worker bean is constructed
   lazily on first inject — which doesn't happen if no one references it.

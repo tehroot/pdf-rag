@@ -50,10 +50,10 @@ docker run -p 8081:8081 \
   --port 8081
 ```
 
-If you have a GPU, add `--gpus all` and use the `:server-cuda` image. If you
-prefer a different backend, anything that speaks OpenAI-compatible
-`/v1/embeddings` works — vLLM (`vllm/vllm-openai:latest --task embedding`),
-[LM Studio's server mode](https://lmstudio.ai), or vanilla OpenAI. Just point
+If you have a GPU, add `--gpus all` and use the `:server-cuda` image. Anything
+that speaks OpenAI-compatible `/v1/embeddings` works — vLLM
+(`vllm/vllm-openai:latest --task embedding`),
+[LM Studio's server mode](https://lmstudio.ai), or vanilla OpenAI — point
 `EMBED_BASE_URL` at it.
 
 ## Build
@@ -131,8 +131,8 @@ export EMBED_MODEL=bge-large-en-v1.5
 java -jar server-stdio/target/quarkus-app/quarkus-run.jar
 ```
 
-If you run this in a terminal it sits there waiting for input — that's correct.
-See [mcp-integration.md](mcp-integration.md) for client wiring.
+Run in a terminal, it sits waiting for input — that's correct. See
+[mcp-integration.md](mcp-integration.md) for client wiring.
 
 ### Streamable HTTP transport — long-lived service at `:PORT/mcp`
 

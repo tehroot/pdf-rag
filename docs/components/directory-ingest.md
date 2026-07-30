@@ -2,7 +2,7 @@
 
 A plain HTTP endpoint that points the server at a directory on disk and
 ingests every matching file — for bulk-loading an inbox or wiring a cron job,
-without an MCP client. New surface, served on the **same port as `/mcp`**.
+without an MCP client. Served on the **same port as `/mcp`**.
 
 - **Logic:** `core/src/main/java/org/hayden/ingest/DirectoryIngestService.java`
   + the `DirectoryIngestRequest` / `DirectoryIngestResponse` /
@@ -103,7 +103,7 @@ Set `INGEST_HOST_ROOT=/` in `.env` to expose the entire host filesystem
 file-share `/`). Any other host path fails with
 `Not a directory (or does not exist)`.
 
-Two caveats: (1) the REST surface has no auth, so everything under
+Caveats: (1) the REST surface has no auth, so everything under
 `INGEST_HOST_ROOT` becomes indexable — and then *searchable* — by anyone who
 can reach the port; the mount is `:ro` but that doesn't stop
 exfiltration-via-search. (2) doc IDs derive from the container path, so the

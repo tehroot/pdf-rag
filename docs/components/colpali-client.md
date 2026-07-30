@@ -54,9 +54,9 @@ Long request timeout (5 min) because CPU sidecar embed calls can be slow on
 large batches. Connect timeout stays short — if the sidecar's down we want to
 fail fast.
 
-Note that `batch-size` here is the **client-side** batch size, separate from
-the sidecar's own `COLPALI_MAX_BATCH_SIZE`. Client batches respect both —
-client splits into batches of `min(client_batch_size, sidecar_max_batch_size)`.
+`batch-size` here is the **client-side** batch size, separate from the
+sidecar's own `COLPALI_MAX_BATCH_SIZE`; the client splits into batches of
+`min(client_batch_size, sidecar_max_batch_size)`.
 
 ## Internals
 

@@ -8,7 +8,7 @@ OpenAI `/v1/embeddings` schema.
 
 ## What it does
 
-Turns a list of strings into a list of vectors, in order, in batches.
+Turns a list of strings into a list of vectors — in order, in batches.
 
 ```
 List<String>  ──┐
@@ -109,9 +109,8 @@ server.
    a useful error message from the embedding server.
 5. Parse the response into `EmbedResponse`.
 6. **Size check.** If the server returned a different number of vectors than
-   we asked for, throw. This catches a class of subtle bugs where a
-   misconfigured server returns a single-element response for a multi-input
-   batch.
+   we asked for, throw. This catches the subtle bug where a misconfigured
+   server returns a single-element response for a multi-input batch.
 7. Each `embedding` (a `List<Double>` over the wire — Jackson can't tell
    floats from doubles in JSON) gets converted to a `float[]`. Qdrant's
    storage is 32-bit so we don't keep the extra precision.
@@ -148,14 +147,28 @@ for the long version.
 |------|--------|
 | `inputs == null` or `inputs.isEmpty()` | Returns `[]` (no HTTP call). |
 | Endpoint unreachable / network error | `IngestException("I/O error calling embeddings endpoint at ...", IOException)` |
-| Endpoint returns non-2xx | `IngestException("Embeddings endpoint returned HTTP X: <body>")` — body included for diagnosis. |
+| Endpoint returns non-2xx | `IngestException("Embeddings endpoint returned HTTP X: <body>")` — body included for diagnosis. Exception: token-cap overflow, which is recovered (below). |
 | Endpoint returns wrong vector count | `IngestException("Embeddings response returned N vectors for M inputs")`. Usually a server-side rate-limit / batch-size mismatch — try lowering `EMBED_BATCH_SIZE`. |
 | Endpoint returns malformed JSON | `IngestException("Failed to parse embeddings response", IOException)`. |
 | Embedding contains `null` | `IngestException("Embedding response had a null vector")`. |
 
-No retries. If you need them, wrap the call upstream — adding retries here
-would obscure transient vs persistent failures and slow down the per-chunk
-budget.
+### Token-cap overflow recovery
+
+The one non-2xx that is *not* fatal: the server rejecting an input as over the
+model's token cap (llama-server: `"input (N tokens) is too large to process"`;
+OpenAI-style: `"maximum context length"`). Dense technical text — part-number
+tables, acronyms, OCR debris — can tokenize under 1.4 chars/token, so a chunk
+sized safely in characters can still exceed bge's hard 512-token cap. Since
+the server doesn't say which input in the batch overflowed, the Embedder
+re-tries the batch one input at a time, and truncates only the offender
+(×0.75 per step, floor 100 chars, warn-logged). The stored chunk `text` is
+untouched — only the embedding input is clipped, and the encoder can't attend
+past its cap anyway. A genuinely un-embeddable input (still rejected at the
+floor) throws.
+
+No other retries. If you need them, wrap the call upstream — adding retries
+here would obscure transient vs persistent failures and slow down the
+per-chunk budget.
 
 ## Why it's like this
 
@@ -192,7 +205,7 @@ budget.
 
 ## Tests
 
-`EmbedderTest` (6 tests, WireMock):
+`EmbedderTest` (9 tests, WireMock):
 
 - `embed_singleBatch_returnsVectorsInOrder` — happy path, two inputs in.
 - `embed_splitsBatches_byBatchSize` — 6 inputs with `batchSize=3` → 2 POSTs.

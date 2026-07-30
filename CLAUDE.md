@@ -88,7 +88,7 @@ has no REST). See [docs/components/directory-ingest.md](docs/components/director
 
 ```
 core/src/main/java/org/hayden/
-├── tools/IngestTools.java              # MCP @Tool surface (7 tools)
+├── tools/IngestTools.java              # MCP @Tool surface (8 tools)
 ├── ingest/
 │   ├── IngestService.java              # dispatcher: picks Backend by arg / default; ingest(req) + ingest(req, explicitDocId)
 │   ├── IngestRequest / SearchRequest   # tool input records

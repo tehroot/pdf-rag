@@ -73,9 +73,8 @@ Injected dependencies:
 
 ### `isEnabledFor(kbName)` — the capability flag
 
-Implicit state pattern: no separate metadata store, no flag table. We check
-whether the `<kb>_pages` collection exists in Qdrant. If it does, visual is
-on for this KB; if not, it's off.
+Implicit state pattern: no separate metadata store, no flag table — visual
+is on for a KB iff the `<kb>_pages` collection exists in Qdrant.
 
 ```java
 return qdrant.getCollection(kbName + "_pages") != null;
@@ -216,9 +215,9 @@ big-endian int32s) — no need to decode the full image.
   the agent surface should be one logical KB, not two-keys-per-document.
   Making `ColPaliPipeline` a regular CDI bean injected into `QdrantBackend`
   lets the orchestrator decide when to call it.
-- **`<kb>_pages` suffix.** Implicit state pattern. The existence of the
-  collection IS the "is visual enabled?" signal — no separate metadata
-  required. Operationally observable via `GET /collections` against Qdrant.
+- **`<kb>_pages` suffix.** The collection's existence IS the "is visual
+  enabled?" signal — no separate metadata. Operationally observable via
+  `GET /collections` against Qdrant.
 - **Images stored outside Qdrant.** A 1000-page corpus at 150 DPI is ~200MB
   of PNG. Putting that in Qdrant payload would bloat the WAL and snapshots
   dramatically. The `PageImageStore` abstraction lets us swap filesystem for
@@ -252,7 +251,6 @@ big-endian int32s) — no need to decode the full image.
 - `inspectPage_missing_returnsNull`
 - `pagesCollectionName_appliesSuffix`
 
-The test setup is involved (real `PageRasterizer` + real `TextLayerProbe` +
-real `FilesystemPageImageStore` with a tmp dir + WireMock-backed sidecar +
-WireMock-backed Qdrant) because each plays a real role. But no live services
-required.
+The test setup is involved (real `PageRasterizer` + `TextLayerProbe` +
+`FilesystemPageImageStore` with a tmp dir + WireMock-backed sidecar and
+Qdrant) because each plays a real role; no live services required.
