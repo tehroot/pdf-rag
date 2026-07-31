@@ -49,6 +49,11 @@ public class IngestService {
         return pick(backendName).deleteDocument(kbName, docId);
     }
 
+    /** Delete an entire KB on the chosen (or default) backend. */
+    public KbDeleteResult deleteKnowledgeBase(String kbName, String backendName) {
+        return pick(backendName).deleteKnowledgeBase(kbName);
+    }
+
     public List<KnowledgeBaseSummary> listKnowledgeBases(String backendName) {
         // Explicit "all" → best-effort merge across every backend, swallowing
         // per-backend errors (e.g. an unconfigured Open WebUI loopback) so the

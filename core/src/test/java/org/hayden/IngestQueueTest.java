@@ -131,6 +131,30 @@ class IngestQueueTest {
     }
 
     @Test
+    void cancelPending_cancelsOnlyQueuedJobsForTheKb() throws Exception {
+        IngestJob inFlight = queue.submit(IngestJob.queuedVisual(sampleRequest("doomed-kb"), "d-0"));
+        IngestJob queued1 = queue.submit(IngestJob.queuedVisual(sampleRequest("doomed-kb"), "d-1"));
+        IngestJob queued2 = queue.submit(IngestJob.queuedVisual(sampleRequest("doomed-kb"), "d-2"));
+        IngestJob otherKb = queue.submit(IngestJob.queuedVisual(sampleRequest("other-kb"), "d-3"));
+        // take() drains FIFO: the first doomed-kb job is now IN_PROGRESS —
+        // a worker-claimed job must NOT be cancelled.
+        IngestJob taken = queue.take(100, TimeUnit.MILLISECONDS).orElseThrow();
+        assertThat(taken.jobId()).isEqualTo(inFlight.jobId());
+
+        int cancelled = queue.cancelPending("doomed-kb");
+
+        assertThat(cancelled).isEqualTo(2);
+        assertThat(queue.getJob(queued1.jobId()).orElseThrow().status()).isEqualTo(JobStatus.FAILED);
+        assertThat(queue.getJob(queued1.jobId()).orElseThrow().error()).contains("deleted");
+        assertThat(queue.getJob(queued2.jobId()).orElseThrow().status()).isEqualTo(JobStatus.FAILED);
+        assertThat(queue.getJob(inFlight.jobId()).orElseThrow().status()).isEqualTo(JobStatus.IN_PROGRESS);
+        assertThat(queue.getJob(otherKb.jobId()).orElseThrow().status()).isEqualTo(JobStatus.QUEUED);
+        // Only the other KB's job remains takeable.
+        IngestJob next = queue.take(100, TimeUnit.MILLISECONDS).orElseThrow();
+        assertThat(next.jobId()).isEqualTo(otherKb.jobId());
+    }
+
+    @Test
     void markFailed_transitionsAndAttachesError() throws Exception {
         IngestJob job = queue.submit(IngestJob.queued(sampleRequest("kb"), "doc-1"));
         queue.take(100, TimeUnit.MILLISECONDS);

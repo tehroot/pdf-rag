@@ -148,6 +148,29 @@ public class IngestQueue {
         pending.offer(jobId);
     }
 
+    /**
+     * Cancel every QUEUED job for a knowledge base (KB deletion support:
+     * a pending visual job draining after the KB's collections are dropped
+     * would resurrect a stub {@code <kb>_pages}). Removing the id from the
+     * pending line first is the atomic claim — if a worker won the race and
+     * already took the job, it is skipped here (documented caveat: one
+     * in-flight job can still complete after the delete; delete again or
+     * ignore the stub). Returns the number cancelled.
+     */
+    public int cancelPending(String kbName) {
+        int cancelled = 0;
+        for (IngestJob job : jobs.values()) {
+            if (job.status() == JobStatus.QUEUED
+                    && kbName.equals(job.request().kbName())
+                    && pending.remove(job.jobId())) {
+                update(job.jobId(), j -> j.withFailed(Instant.now(),
+                        "Cancelled: knowledge base '" + kbName + "' deleted"));
+                cancelled++;
+            }
+        }
+        return cancelled;
+    }
+
     /** Number of jobs awaiting a worker. Useful for backpressure and tests. */
     public int pendingCount() {
         return pending.size();

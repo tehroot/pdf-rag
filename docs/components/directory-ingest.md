@@ -25,6 +25,11 @@ DELETE /ingest/document        remove a document (by doc_id or source_path)
 
 GET    /kb                     list KBs: stats, per-KB document_count, total_documents roll-up
 GET    /kb/{name}              one KB's status (404 if absent; ?backend= to scope)
+DELETE /kb/{name}              full KB teardown; requires ?confirm=true
+                               (drops <kb> + <kb>_pages collections, stored page
+                               images, and cancels the KB's queued jobs; a job
+                               already in flight may recreate a stub pages
+                               collection — delete again if so)
 ```
 
 `GET /ingest/jobs` returns `{total, pending, returned, jobs:[...]}` — total and

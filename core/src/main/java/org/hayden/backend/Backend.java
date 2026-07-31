@@ -42,6 +42,15 @@ public interface Backend {
         throw new IngestException("delete_document is not supported by backend '" + name() + "'");
     }
 
+    /**
+     * Delete an entire knowledge base — collections, stored artifacts, and
+     * pending queue work. Default is unsupported — only backends that own
+     * their storage (Qdrant) implement it.
+     */
+    default org.hayden.ingest.KbDeleteResult deleteKnowledgeBase(String kbName) {
+        throw new IngestException("delete_knowledge_base is not supported by backend '" + name() + "'");
+    }
+
     /** List knowledge-base / collection names visible to this backend. */
     List<KnowledgeBaseSummary> listKnowledgeBases();
 

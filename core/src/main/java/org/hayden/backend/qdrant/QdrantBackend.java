@@ -9,6 +9,7 @@ import org.hayden.backend.Backend;
 import org.hayden.backend.KnowledgeBaseSummary;
 import org.hayden.backend.qdrant.fusion.FusionEngine;
 import org.hayden.ingest.DeleteResult;
+import org.hayden.ingest.KbDeleteResult;
 import org.hayden.ingest.FetchedFile;
 import org.hayden.ingest.FileFetcher;
 import org.hayden.ingest.IngestException;
@@ -250,6 +251,38 @@ public class QdrantBackend implements Backend {
         }
         return new DeleteResult(NAME, kbName, docId, textDeleted,
                 visual.pointsDeleted(), visual.imagesRemoved(), message);
+    }
+
+    /**
+     * Full KB teardown: cancel pending queue work first (a queued visual job
+     * draining afterwards would resurrect a stub {@code <kb>_pages}), then
+     * drop the chunk collection, the pages collection, and the stored page
+     * images. Idempotent — deleting an absent KB reports nothing dropped.
+     * Caveat: a job already IN_PROGRESS can't be stopped and may recreate a
+     * stub pages collection when it completes; delete again if that matters.
+     */
+    @Override
+    public KbDeleteResult deleteKnowledgeBase(String kbName) {
+        if (kbName == null || kbName.isBlank()) {
+            throw new IngestException("kb_name is required");
+        }
+        int jobsCancelled = queue.cancelPending(kbName);
+        boolean textDropped = chunks.dropCollection(kbName);
+        ColPaliPipeline.DropResult visual = pages.dropVisualIndex(kbName);
+        String message;
+        if (!textDropped && !visual.collectionDropped()) {
+            message = "No collections found for KB '" + kbName + "'; nothing deleted"
+                    + (jobsCancelled > 0 ? " (" + jobsCancelled + " queued job(s) cancelled)" : "")
+                    + ".";
+        } else {
+            message = "Deleted KB '" + kbName + "': "
+                    + (textDropped ? "chunk collection" : "no chunk collection")
+                    + ", " + (visual.collectionDropped() ? "pages collection" : "no pages collection")
+                    + ", " + visual.filesRemoved() + " page image(s), "
+                    + jobsCancelled + " queued job(s) cancelled.";
+        }
+        return new KbDeleteResult(NAME, kbName, textDropped,
+                visual.collectionDropped(), visual.filesRemoved(), jobsCancelled, message);
     }
 
     @Override
