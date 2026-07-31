@@ -100,6 +100,10 @@ services:
       COLPALI_DEVICE: ${COLPALI_DEVICE:-cpu}
       COLPALI_DTYPE: ${COLPALI_DTYPE:-float32}
       COLPALI_MAX_BATCH_SIZE: ${COLPALI_MAX_BATCH_SIZE:-4}
+      # Qwen3-VL-class models (tomoro handle): visual-token cap + attention
+      # impl. Ignored by colpali-engine models.
+      COLPALI_MAX_VISUAL_TOKENS: ${COLPALI_MAX_VISUAL_TOKENS:-1280}
+      COLPALI_ATTN_IMPL: ${COLPALI_ATTN_IMPL:-sdpa}
     volumes:
       # Cache HF model downloads on the host so container restarts don't
       # re-fetch multi-GB checkpoints.

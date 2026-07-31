@@ -292,7 +292,7 @@ The wire shape (`/info`) is identical regardless — the Java side adapts.
 
 ## Tests
 
-26 tests, all run without torch installed (autouse `FakeModelHandle` injection):
+32 tests, all run without torch installed (autouse `FakeModelHandle` injection):
 
 - `test_pooling.py` (9): row/col pooling correctness, grid-size adapt,
   special-token preservation, sanity checks.

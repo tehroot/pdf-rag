@@ -3,7 +3,9 @@
 # Base: pytorch/pytorch ships with CUDA-enabled torch + python pre-installed,
 # keeping our layer thin. NVIDIA NGC images (nvcr.io/nvidia/pytorch) are
 # bigger and would also work, but require an NGC login for some tags.
-FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime AS base
+# torch 2.8 is the version tomoro-colqwen3's remote code is pinned against;
+# cu12.8 covers SM 7.0-12.0 (A4500 = SM 8.6 native).
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime AS base
 
 # A few small system bits not in the pytorch base image.
 RUN apt-get update && apt-get install -y --no-install-recommends \

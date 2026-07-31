@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     # Inference parameters
     max_batch_size: int = 8
     pool_grid: int = 32  # the patch grid side used for row/col pooling
+    # Dynamic-resolution cap for Qwen3-VL-class processors (tomoro handle).
+    # Bounds visual tokens per page — without it a dense page can exceed
+    # 12k tokens and OOM the batch. Ignored by grid-based (colpali-engine)
+    # models, which cap resolution in their own presets.
+    max_visual_tokens: int = 1280
+    # Attention implementation for trust_remote_code models: "sdpa" works
+    # everywhere; "flash_attention_2" is faster but needs flash-attn installed.
+    attn_impl: str = "sdpa"
 
     # HTTP server bind
     host: str = "0.0.0.0"

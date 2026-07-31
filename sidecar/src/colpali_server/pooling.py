@@ -79,6 +79,36 @@ def _pool(
     return pooled
 
 
+def bucket_pool(
+    embedding: list[list[float]], n_buckets: int = 32, strided: bool = False
+) -> list[list[float]]:
+    """Sequence pooling for models whose page tokens aren't a square grid
+    (Qwen3-VL dynamic resolution — token count varies per page).
+
+    Averages the token sequence into ``n_buckets`` groups. ``strided=False``
+    pools contiguous runs (for raster-ordered patch tokens this approximates
+    horizontal bands — the row analog); ``strided=True`` pools every
+    ``n_buckets``-th token together (the column analog). The two views give
+    the ANN prefetch stage the same complementary coverage the grid pooling
+    gives ColPali-class models.
+
+    Sequences shorter than ``n_buckets`` are returned unchanged.
+    """
+    n_tokens = len(embedding)
+    if n_tokens == 0 or n_tokens <= n_buckets:
+        return list(embedding)
+    dim = len(embedding[0])
+    sums = [[0.0] * dim for _ in range(n_buckets)]
+    counts = [0] * n_buckets
+    for i, row in enumerate(embedding):
+        b = i % n_buckets if strided else min(i * n_buckets // n_tokens, n_buckets - 1)
+        s = sums[b]
+        for j in range(dim):
+            s[j] += row[j]
+        counts[b] += 1
+    return [[v / counts[b] for v in sums[b]] for b in range(n_buckets)]
+
+
 def n_special_tokens_for_model(model_name: str) -> int:
     """Best-effort number of special (non-patch) tokens per model family.
 
