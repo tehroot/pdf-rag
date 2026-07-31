@@ -296,6 +296,56 @@ class QdrantBackendTest {
     }
 
     @Test
+    void deleteKnowledgeBase_dropsCollectionsImagesAndQueuedJobs() throws Exception {
+        java.nio.file.Path tmpRoot = java.nio.file.Files.createTempDirectory("qb-kbdel-");
+        try {
+            QdrantBackend visualBackend = newBackendWithVisual(mock.baseUrl(), tmpRoot);
+            ColPaliPipeline pages = (ColPaliPipeline) getField(visualBackend, "pages");
+            org.hayden.backend.qdrant.FilesystemPageImageStore store =
+                    (org.hayden.backend.qdrant.FilesystemPageImageStore) getField(pages, "imageStore");
+            store.store("v-kb", "d-9", 1, "p1".getBytes());
+            store.store("v-kb", "d-9", 2, "p2".getBytes());
+
+            IngestQueue queue = (IngestQueue) getField(visualBackend, "queue");
+            IngestRequest doomed = new IngestRequest(SourceType.INLINE, "x", "a.pdf",
+                    "v-kb", null, 0L, "qdrant", null, true);
+            IngestRequest other = new IngestRequest(SourceType.INLINE, "x", "b.pdf",
+                    "other-kb", null, 0L, "qdrant", null, true);
+            var doomedJob = queue.submit(org.hayden.jobs.IngestJob.queuedVisual(doomed, "d-1"));
+            var otherJob = queue.submit(org.hayden.jobs.IngestJob.queuedVisual(other, "d-2"));
+
+            mock.stubFor(get(urlEqualTo("/collections/v-kb"))
+                    .willReturn(aResponse().withStatus(200).withBody("""
+                            {"result":{"config":{"params":{"vectors":{"size":384,"distance":"Cosine"}}}}}""")));
+            mock.stubFor(com.github.tomakehurst.wiremock.client.WireMock.delete(urlEqualTo("/collections/v-kb"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+            mock.stubFor(get(urlEqualTo("/collections/v-kb_pages"))
+                    .willReturn(aResponse().withStatus(200).withBody("""
+                            {"result":{"config":{"params":{"vectors":{"original":{"size":128}}}}}}""")));
+            mock.stubFor(com.github.tomakehurst.wiremock.client.WireMock.delete(urlEqualTo("/collections/v-kb_pages"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+
+            var r = visualBackend.deleteKnowledgeBase("v-kb");
+
+            assertThat(r.textCollectionDropped()).isTrue();
+            assertThat(r.visualCollectionDropped()).isTrue();
+            assertThat(r.imagesRemoved()).isEqualTo(2);
+            assertThat(r.jobsCancelled()).isEqualTo(1);
+            mock.verify(com.github.tomakehurst.wiremock.client.WireMock
+                    .deleteRequestedFor(urlEqualTo("/collections/v-kb")));
+            mock.verify(com.github.tomakehurst.wiremock.client.WireMock
+                    .deleteRequestedFor(urlEqualTo("/collections/v-kb_pages")));
+            // Doomed KB's queued job cancelled; the other KB's untouched.
+            assertThat(queue.getJob(doomedJob.jobId()).orElseThrow().status())
+                    .isEqualTo(org.hayden.jobs.JobStatus.FAILED);
+            assertThat(queue.getJob(otherJob.jobId()).orElseThrow().status())
+                    .isEqualTo(org.hayden.jobs.JobStatus.QUEUED);
+        } finally {
+            deleteTree(tmpRoot);
+        }
+    }
+
+    @Test
     void search_embedsQueryThenCallsQdrantSearch() {
         mock.stubFor(post(urlEqualTo("/v1/embeddings"))
                 .willReturn(aResponse().withStatus(200)

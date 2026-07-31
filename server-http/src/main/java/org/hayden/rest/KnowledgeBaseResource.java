@@ -1,6 +1,7 @@
 package org.hayden.rest;
 
 import jakarta.inject.Inject;
+import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.Path;
@@ -12,7 +13,9 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.parameters.Parameter;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
+import org.hayden.ingest.IngestException;
 import org.hayden.ingest.IngestService;
+import org.hayden.ingest.KbDeleteResult;
 import org.hayden.ingest.KnowledgeBaseListResponse;
 import org.hayden.ingest.KnowledgeBaseStatus;
 
@@ -64,5 +67,28 @@ public class KnowledgeBaseResource {
             throw new NotFoundException("Unknown knowledge base: " + name);
         }
         return status;
+    }
+
+    @DELETE
+    @Path("/{name}")
+    @Operation(summary = "Delete a knowledge base",
+            description = "Full teardown: the KB's chunk collection, its visual pages collection, "
+                    + "all stored page images, and any queued ingest jobs for it. Idempotent. "
+                    + "Requires confirm=true — this destroys the entire index (the source "
+                    + "documents on disk are untouched; a re-ingest rebuilds it).")
+    @APIResponse(responseCode = "400", description = "Missing confirm=true, or unsupported backend")
+    public KbDeleteResult delete(
+            @Parameter(description = "Knowledge base / collection name")
+            @PathParam("name") String name,
+            @Parameter(description = "Must be true — guards against accidental teardown")
+            @QueryParam("confirm") boolean confirm,
+            @Parameter(description = "Backend; defaults to the server-configured backend")
+            @QueryParam("backend") String backend) {
+        if (!confirm) {
+            throw new IngestException("Refusing to delete knowledge base '" + name
+                    + "' without confirm=true. This drops the KB's collections, page images, "
+                    + "and queued jobs.");
+        }
+        return ingest.deleteKnowledgeBase(name, backend);
     }
 }

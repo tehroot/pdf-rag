@@ -152,7 +152,8 @@ core/src/main/java/org/hayden/
 `GET /ingest/status/{jobId}`, `GET /ingest/jobs` (list, `?status=` filter),
 `DELETE /ingest/document` (by `doc_id` or `source_path`), plus KB status on
 `GET /kb` (listing with per-KB + total distinct-document counts via the
-Qdrant facet API) and `GET /kb/{name}`. Logic is in `core`
+Qdrant facet API), `GET /kb/{name}`, and `DELETE /kb/{name}?confirm=true`
+(full teardown: chunk + pages collections, page images, queued jobs). Logic is in `core`
 (`DirectoryIngestService`, `IngestService`); see
 [docs/components/directory-ingest.md](docs/components/directory-ingest.md).
 In the Docker deployment, paths in `POST /ingest/directory` resolve *inside

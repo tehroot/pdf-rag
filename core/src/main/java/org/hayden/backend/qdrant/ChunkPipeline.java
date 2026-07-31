@@ -224,6 +224,19 @@ public class ChunkPipeline {
     }
 
     /**
+     * Drop the KB's chunk collection entirely (KB deletion). Returns true if
+     * it existed. The visual-side counterpart is
+     * {@link ColPaliPipeline#dropVisualIndex}.
+     */
+    public boolean dropCollection(String kbName) {
+        if (!collectionExists(kbName)) {
+            return false;
+        }
+        qdrant.deleteCollection(kbName);
+        return true;
+    }
+
+    /**
      * Distinct document count in the KB's chunk collection (facet on the
      * payload-indexed {@code doc_id}), or null if the collection doesn't exist.
      */
