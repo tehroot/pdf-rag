@@ -36,7 +36,7 @@ mvn -pl server-http quarkus:dev                              # HTTP transport, l
 # Python sidecar
 cd sidecar
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest -q                       # 26 tests, no torch needed (uses FakeModelHandle)
+.venv/bin/pytest -q                       # 32 tests, no torch needed (uses FakeModelHandle)
 .venv/bin/pip install -e ".[ml]"          # add real ml deps for actual model loading
 .venv/bin/colpali-server                   # run sidecar on :8090
 
@@ -256,8 +256,13 @@ Unchanged. `OpenWebUiBackend.ingest`: find-or-create KB → multipart upload
 `sidecar/` — separate Python project. FastAPI service exposing the contract
 `ColPaliClient` consumes: `/healthz`, `/info`, `/embed_pages`, `/embed_query`.
 Runs ColPali / ColQwen2 / ColSmolVLM / ColFlor via the `colpali-engine`
-library. Model name is configurable (`COLPALI_MODEL`). The Java side stays
-model-agnostic via `/info`.
+library, plus TomoroAI colqwen3 models (Qwen3-VL backbone, 320-dim head) via
+`trust_remote_code` in a dedicated handle — `loader.handle_class_for` routes
+"tomoro" names BEFORE the "colqwen" substring match, or the checkpoint gets
+forced through Qwen2-VL modeling and crashes. Qwen3-VL-class models use
+sequence-bucket pooling (dynamic resolution, no square grid) and the
+`COLPALI_MAX_VISUAL_TOKENS` cap (default 1280). Model name is configurable
+(`COLPALI_MODEL`). The Java side stays model-agnostic via `/info`.
 
 ## Gotchas (non-obvious, will bite you)
 

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from .config import Settings
 from .model import ModelHandle
-from .pooling import mean_pool_cols, mean_pool_rows, n_special_tokens_for_model
+from .pooling import bucket_pool, mean_pool_cols, mean_pool_rows, n_special_tokens_for_model
 from .schemas import (
     EmbedPagesRequest,
     EmbedPagesResponse,
@@ -40,13 +40,21 @@ def embed_pages_inference(
 
     n_special = n_special_tokens_for_model(handle.model_name)
     grid = cfg.pool_grid
+    # Handles declare their pooling geometry: "grid" (ColPali-class square
+    # patch grid, the default) or "sequence" (Qwen3-VL-class dynamic
+    # resolution — bucket-pool the token sequence instead).
+    sequence_pooling = getattr(handle, "pooling_mode", "grid") == "sequence"
 
     out: list[PageEmbedding] = []
     for page, embedding in zip(req.pages, raw, strict=True):
         original = embedding if req.include_original else []
         if req.include_pooled and cfg.enable_pooled:
-            pooled_rows = mean_pool_rows(embedding, grid_size=grid, n_special_tokens=n_special)
-            pooled_cols = mean_pool_cols(embedding, grid_size=grid, n_special_tokens=n_special)
+            if sequence_pooling:
+                pooled_rows = bucket_pool(embedding, n_buckets=grid, strided=False)
+                pooled_cols = bucket_pool(embedding, n_buckets=grid, strided=True)
+            else:
+                pooled_rows = mean_pool_rows(embedding, grid_size=grid, n_special_tokens=n_special)
+                pooled_cols = mean_pool_cols(embedding, grid_size=grid, n_special_tokens=n_special)
         else:
             pooled_rows = []
             pooled_cols = []

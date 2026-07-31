@@ -27,7 +27,9 @@ dependencies = [
 # Dockerfile's extra-index-url.
 ml = [
     "torch>=2.4,<3.0",
-    "transformers>=4.45,<5.0",
+    # 4.57+ required for Qwen3-VL classes (tomoro-colqwen3 remote code
+    # imports them); colpali-engine models are unaffected by the floor bump.
+    "transformers>=4.57.2,<5.0",
     "accelerate>=0.34,<2.0",
     "numpy>=1.26,<3.0",
     # colpali-engine provides ColPaliForRetrieval / ColQwen2ForRetrieval + pooling helpers.

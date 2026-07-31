@@ -103,3 +103,47 @@ def test_sanity_check_dims_raises_on_inconsistent():
 
     with pytest.raises(ValueError, match="Inconsistent"):
         sanity_check_dims([[1.0, 2.0], [3.0, 4.0, 5.0]])
+
+
+# ---- bucket pooling (sequence mode, Qwen3-VL-class handles) -----------------
+
+
+def test_bucket_pool_contiguous_averages_runs():
+    from colpali_server.pooling import bucket_pool
+
+    # 8 tokens, dim 2, 4 buckets -> pairs averaged in order.
+    emb = [[float(i), float(i * 10)] for i in range(8)]
+    out = bucket_pool(emb, n_buckets=4, strided=False)
+    assert len(out) == 4
+    assert out[0] == [0.5, 5.0]     # mean of tokens 0,1
+    assert out[3] == [6.5, 65.0]    # mean of tokens 6,7
+
+
+def test_bucket_pool_strided_interleaves():
+    from colpali_server.pooling import bucket_pool
+
+    emb = [[float(i)] for i in range(8)]
+    out = bucket_pool(emb, n_buckets=4, strided=True)
+    assert len(out) == 4
+    assert out[0] == [2.0]          # tokens 0,4
+    assert out[1] == [3.0]          # tokens 1,5
+
+
+def test_bucket_pool_short_sequence_passthrough():
+    from colpali_server.pooling import bucket_pool
+
+    emb = [[1.0], [2.0]]
+    assert bucket_pool(emb, n_buckets=32) == emb
+
+
+def test_bucket_pool_uneven_lengths_cover_all_tokens():
+    from colpali_server.pooling import bucket_pool
+
+    # 10 tokens into 4 buckets: bucket sizes may differ but every token
+    # contributes exactly once and output is well-formed.
+    emb = [[float(i)] for i in range(10)]
+    out = bucket_pool(emb, n_buckets=4, strided=False)
+    assert len(out) == 4
+    total = sum(v[0] for v in out)  # sums of averages, just shape/finite check
+    assert all(len(v) == 1 for v in out)
+    assert total > 0

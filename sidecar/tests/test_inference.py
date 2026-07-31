@@ -151,3 +151,47 @@ def test_http_embed_query_round_trip(fake_client: TestClient) -> None:
     body = r.json()
     assert len(body["vectors"]) > 0
     assert all(len(v) == 8 for v in body["vectors"])
+
+
+# ---- handle routing + sequence pooling (tomoro / Qwen3-VL class) ------------
+
+
+def test_handle_class_routing_tomoro_before_colqwen_substring():
+    from colpali_server.loader import handle_class_for
+    from colpali_server.model import RealModelHandle
+    from colpali_server.tomoro import TomoroColQwen3Handle
+
+    # The regression this guards: "tomoro-colqwen3-embed-4b" contains
+    # "colqwen" and used to fall through to ColQwen2's Qwen2-VL modeling.
+    assert handle_class_for("TomoroAI/tomoro-colqwen3-embed-4b") is TomoroColQwen3Handle
+    assert handle_class_for("vidore/colqwen2-v1.0") is RealModelHandle
+    assert handle_class_for("vidore/colqwen2.5-v0.2") is RealModelHandle
+
+
+def test_embed_pages_sequence_pooling_via_handle_attribute():
+    from colpali_server.config import Settings
+    from colpali_server.inference import embed_pages_inference
+    from colpali_server.schemas import EmbedPagesRequest, PageItem
+
+    # Fake with non-square token count (Qwen3-VL dynamic resolution) that
+    # declares sequence pooling.
+    handle = FakeModelHandle(model_name="TomoroAI/tomoro-colqwen3-embed-4b",
+                             vector_dim=4, grid_size=7, n_special_tokens=1)
+    handle.pooling_mode = "sequence"
+
+    cfg = Settings(model="TomoroAI/tomoro-colqwen3-embed-4b")
+    req = EmbedPagesRequest(
+        pages=[PageItem(page_id="d:1", image_b64=_make_b64_png())],
+        include_original=True,
+        include_pooled=True,
+    )
+    resp = embed_pages_inference(handle, req, cfg)
+
+    emb = resp.embeddings[0]
+    n_tokens = len(emb.original)
+    assert n_tokens == 7 * 7 + 1          # fake emits grid²+specials tokens
+    # Sequence-bucketed: both pooled views bounded by pool_grid buckets,
+    # NOT the grid+specials layout the grid pooling would produce.
+    assert len(emb.pooled_rows) == min(cfg.pool_grid, n_tokens)
+    assert len(emb.pooled_cols) == min(cfg.pool_grid, n_tokens)
+    assert all(len(v) == 4 for v in emb.pooled_rows)

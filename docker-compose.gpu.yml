@@ -55,3 +55,6 @@ services:
       # COLPALI_MAX_BATCH_SIZE above so batches arrive GPU-sized.
       INGEST_QUEUE_WORKERS: ${INGEST_QUEUE_WORKERS:-2}
       COLPALI_BATCH_SIZE: ${COLPALI_BATCH_SIZE:-16}
+      # 4 is sized for 320-dim pages (tomoro: ~5 MB JSON each vs Qdrant's
+      # ~32 MB cap). Fine for 128-dim models too — upsert is overlap-hidden.
+      INGEST_QDRANT_MULTIVECTOR_UPSERT_BATCH: ${INGEST_QDRANT_MULTIVECTOR_UPSERT_BATCH:-4}
