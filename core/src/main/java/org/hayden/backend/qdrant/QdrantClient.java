@@ -268,18 +268,27 @@ public class QdrantClient {
      * @param binaryQuantize when true, adds {@code quantization_config.binary} with
      *                       {@code always_ram=true}; recovers most of the storage cost
      *                       of keeping the full-resolution vectors around
+     * @param onDisk         when true, sets {@code on_disk=true} — vectors are served
+     *                       from mmap'd files (page-cache warm) instead of mandatory
+     *                       RAM residency. Essential for the full-resolution vectors:
+     *                       they're rerank-only, and at ~1.6 MB/page a mid-size corpus
+     *                       otherwise demands tens of GB of RAM
      */
     public record MultiVectorConfig(int size, String distance, String comparator,
-                                     boolean hnswEnabled, boolean binaryQuantize) {
+                                     boolean hnswEnabled, boolean binaryQuantize,
+                                     boolean onDisk) {
 
-        /** Pooled-vector preset: ANN-indexed, no quantization. */
+        /** Pooled-vector preset: ANN-indexed, no quantization, RAM-resident
+         *  (small, and the prefetch stage is latency-critical). */
         public static MultiVectorConfig pooled(int size) {
-            return new MultiVectorConfig(size, "Cosine", "max_sim", true, false);
+            return new MultiVectorConfig(size, "Cosine", "max_sim", true, false, false);
         }
 
-        /** Original-vector preset: HNSW disabled, binary quantization on. */
+        /** Original-vector preset: HNSW disabled, binary quantization on
+         *  (codes {@code always_ram}), full vectors on disk — the standard
+         *  late-interaction layout: prefetch from RAM, rerank from mmap. */
         public static MultiVectorConfig originalRerankOnly(int size) {
-            return new MultiVectorConfig(size, "Cosine", "max_sim", false, true);
+            return new MultiVectorConfig(size, "Cosine", "max_sim", false, true, true);
         }
     }
 
@@ -348,6 +357,9 @@ public class QdrantClient {
         if (cfg.binaryQuantize()) {
             m.put("quantization_config",
                     Map.of("binary", Map.of("always_ram", true)));
+        }
+        if (cfg.onDisk()) {
+            m.put("on_disk", true);
         }
         return m;
     }

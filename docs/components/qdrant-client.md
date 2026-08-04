@@ -113,9 +113,12 @@ Two presets cover the typical ColPali setup:
 - `pooled(dim)` for `pooled_rows` / `pooled_cols` — HNSW enabled, no
   quantization. Used as the fast ANN prefetch stage.
 - `originalRerankOnly(dim)` for the `original` full-resolution vectors —
-  `hnsw_config.m=0` (HNSW disabled, rerank-only) + binary quantization on
-  with `always_ram=true`. Recovers ~16× storage on the largest of the three
-  vector sets.
+  `hnsw_config.m=0` (HNSW disabled, rerank-only), binary quantization with
+  `always_ram=true`, and `on_disk=true`: the full vectors are mmap-served
+  from disk, so RAM holds only the BQ codes (~1 bit/dim) and the pooled
+  prefetch vectors. Without `on_disk`, Qdrant keeps vectors RAM-resident by
+  default — at ~1.6 MB/page (320-dim × ~1280 tokens) a mid-size corpus
+  demands tens of GB of mandatory RAM. Rerank reads hit the page cache warm.
 
 ### `createMultivectorCollection(name, namedVectors)`
 
