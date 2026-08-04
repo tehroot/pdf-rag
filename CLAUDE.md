@@ -188,7 +188,8 @@ then delegate.
    `PageImageStore.store` → `ColPaliClient.embedPages` →
    `QdrantClient.upsertMultivectorPoints` to `<kb>_pages` collection
    (named vectors: `original` + `pooled_rows` + `pooled_cols`, MAX_SIM
-   comparator, binary quantization on `original`).
+   comparator; `original` is rerank-only: HNSW off, binary quantization
+   `always_ram`, full vectors `on_disk` — RAM holds only BQ codes + pooled).
 
 ### Sync vs async routing (split visual ingest)
 

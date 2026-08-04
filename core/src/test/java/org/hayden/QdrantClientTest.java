@@ -303,11 +303,15 @@ class QdrantClientTest {
         assertThat(body).contains("\"pooled_cols\"");
         assertThat(body).contains("\"max_sim\"");
         assertThat(body).contains("\"size\":128");
-        // original is rerank-only → hnsw disabled and binary quantization on.
+        // original is rerank-only → hnsw disabled, binary quantization on,
+        // and full vectors on disk (mmap-served — RAM holds only the BQ codes).
         assertThat(body).contains("\"hnsw_config\":{\"m\":0}");
         assertThat(body).contains("\"quantization_config\"");
         assertThat(body).contains("\"binary\"");
         assertThat(body).contains("\"always_ram\":true");
+        assertThat(body).contains("\"on_disk\":true");
+        // pooled vectors stay RAM-resident: on_disk appears exactly once.
+        assertThat(body.split("\"on_disk\":true", -1)).hasSize(2);
     }
 
     @Test
