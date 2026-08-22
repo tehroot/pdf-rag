@@ -325,6 +325,19 @@ sequence-bucket pooling (dynamic resolution, no square grid) and the
   previous random id still remains). Before/after chunking comparisons still
   want fresh KBs (see docs/eval/retrieval-eval.md); no dedupe by source URL.
 
+- **`trust_remote_code` checkpoints must be revision-pinned.** The sidecar
+  *executes* code shipped by the model repo (`modeling_colqwen3.py` for the
+  tomoro handle). With no `revision`, `from_pretrained` tracks `main`, so an
+  upstream push changes what production runs with zero change on our side. On
+  2026-08-14 `TomoroAI/tomoro-colqwen3-embed-4b` migrated to transformers 5.x
+  and the next container recreate died at startup with `AttributeError: 'list'
+  object has no attribute 'items'` (its code now expects `_tied_weights_keys`
+  to be a dict; transformers 4.x gives a list). `COLPALI_MODEL_REVISION` pins
+  it; `bf790bd8780b098b86453444632a184bb770be1a` is the last 4.x-compatible
+  revision. Same weights, same 320-dim head — pinning needs no re-index.
+  Note the sidecar's `transformers>=4.57.2,<5.0` pin is now behind the
+  ecosystem: colpali-engine 0.3.18+ requires `transformers>=5.3`.
+
 - **`<kb>_pages` is the visual-index capability flag.** Implicit state.
   `ColPaliPipeline.isEnabledFor(kbName)` calls `qdrant.getCollection(<kb>_pages)
   != null`. No separate metadata store.

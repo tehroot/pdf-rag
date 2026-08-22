@@ -102,6 +102,12 @@ services:
       - "${COLPALI_PORT:-8090}:8090"
     environment:
       COLPALI_MODEL: ${COLPALI_MODEL:-vidore/colsmolvlm-v0.1}
+      # Pin the Hub revision. Empty = "main", which is NOT safe for
+      # trust_remote_code models (tomoro-colqwen3): the repo ships the
+      # modeling code this process executes, so an upstream push can change
+      # or break the running model with no change on our side. See
+      # .env.example for the known-good hash.
+      COLPALI_MODEL_REVISION: ${COLPALI_MODEL_REVISION:-}
       COLPALI_DEVICE: ${COLPALI_DEVICE:-cpu}
       COLPALI_DTYPE: ${COLPALI_DTYPE:-float32}
       COLPALI_MAX_BATCH_SIZE: ${COLPALI_MAX_BATCH_SIZE:-4}
