@@ -102,13 +102,17 @@ class RealModelHandle:
         self._dtype = _select_dtype(cfg.dtype, self._device)
 
         resolved = _resolve_model_classes(cfg.model)
+        revision = cfg.model_revision or None
         # torch_dtype is the recommended kwarg name as of transformers 4.45+.
         self._model = resolved.model_cls.from_pretrained(
             cfg.model,
+            revision=revision,
             torch_dtype=self._dtype,
             device_map=self._device,
         ).eval()
-        self._processor = resolved.processor_cls.from_pretrained(cfg.model)
+        self._processor = resolved.processor_cls.from_pretrained(
+            cfg.model, revision=revision
+        )
 
     @property
     def model_name(self) -> str:

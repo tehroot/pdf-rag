@@ -21,6 +21,13 @@ class Settings(BaseSettings):
 
     # Model selection
     model: str = "vidore/colqwen2-v1.0"
+    # Pin the checkpoint to one git revision on the Hub. Empty = whatever
+    # "main" is today, which is NOT stable for trust_remote_code models: the
+    # repo ships executable modeling code, so an upstream push changes what
+    # this process runs with no change on our side. That is exactly how
+    # tomoro-colqwen3 broke — see the README and .env.example for the
+    # known-good hash. Pin it in any deployment you care about.
+    model_revision: str = ""
     device: str = "auto"  # "cuda" | "cpu" | "mps" | "auto"
     dtype: str = "bfloat16"  # "float32" | "float16" | "bfloat16"
 

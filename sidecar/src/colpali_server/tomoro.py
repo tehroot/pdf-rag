@@ -47,13 +47,19 @@ class TomoroColQwen3Handle:
 
         from transformers import AutoModel, AutoProcessor  # lazy: needs ml extras
 
+        # revision=None means "main". Passing it explicitly keeps the
+        # processor and the model on the SAME revision — a mismatch between
+        # them is worse than either being stale.
+        revision = cfg.model_revision or None
         self._processor = AutoProcessor.from_pretrained(
             cfg.model,
+            revision=revision,
             trust_remote_code=True,
             max_num_visual_tokens=cfg.max_visual_tokens,
         )
         self._model = AutoModel.from_pretrained(
             cfg.model,
+            revision=revision,
             dtype=self._dtype,
             attn_implementation=cfg.attn_impl,
             trust_remote_code=True,
