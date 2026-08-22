@@ -61,6 +61,17 @@ public record IngestJob(
         return kind == null ? JobKind.FULL : kind;
     }
 
+    /**
+     * Same job, different request. Used at submit time to repoint a queued
+     * job's source at its hardlink snapshot (see
+     * {@link org.hayden.ingest.JobSourceSnapshots}) — the job id must stay
+     * stable because the snapshot directory is keyed on it.
+     */
+    public IngestJob withRequest(IngestRequest newRequest) {
+        return new IngestJob(jobId, status, newRequest, docId, submittedAt,
+                startedAt, completedAt, result, error, warnings, retryCount, kind);
+    }
+
     public IngestJob withStatus(JobStatus newStatus) {
         return new IngestJob(jobId, newStatus, request, docId, submittedAt,
                 startedAt, completedAt, result, error, warnings, retryCount, kind);

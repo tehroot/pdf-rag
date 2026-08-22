@@ -9,16 +9,11 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.stream.Stream;
 
 /**
@@ -39,8 +34,9 @@ public class DirectoryIngestService {
 
     private static final Logger LOG = Logger.getLogger(DirectoryIngestService.class);
 
-    /** Extensions accepted when the request doesn't specify its own filter. */
-    private static final Set<String> DEFAULT_EXTENSIONS = Set.of(
+    /** Extensions accepted when the request doesn't specify its own filter.
+     *  Package-visible: the upload path's ZIP expansion accepts the same set. */
+    static final Set<String> DEFAULT_EXTENSIONS = Set.of(
             "pdf", "txt", "md", "html", "htm", "json", "csv", "docx", "xlsx", "pptx");
 
     @Inject
@@ -103,43 +99,14 @@ public class DirectoryIngestService {
     }
 
     /**
-     * Ingest every file on a bounded worker pool, {@code parallelism} files in
-     * flight at once. Outcomes come back in scan order regardless of completion
-     * order. Per-file failure is captured as an "error" outcome (never aborts
-     * the batch), so the only thing that can interrupt collection is the
-     * calling thread itself being interrupted.
+     * Ingest every file via the shared {@link BatchIngestExecutor},
+     * {@code parallelism} files in flight at once. Outcomes come back in scan
+     * order regardless of completion order; per-file failure is captured as an
+     * "error" outcome by {@link #ingestOne} and never aborts the batch.
      */
     private List<DirectoryFileOutcome> ingestAll(DirectoryIngestRequest req, List<Path> files) {
-        if (files.isEmpty()) {
-            return List.of();
-        }
-        int threads = Math.min(parallelism, files.size());
-        ExecutorService pool = Executors.newFixedThreadPool(threads, r -> {
-            Thread t = new Thread(r);
-            t.setName("dir-ingest-" + t.threadId());
-            return t;
-        });
-        try {
-            List<Future<DirectoryFileOutcome>> futures = new ArrayList<>(files.size());
-            for (Path f : files) {
-                futures.add(pool.submit(() -> ingestOne(req, f)));
-            }
-            List<DirectoryFileOutcome> outcomes = new ArrayList<>(files.size());
-            for (Future<DirectoryFileOutcome> future : futures) {
-                outcomes.add(future.get());
-            }
-            return outcomes;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IngestException("Directory ingest interrupted", e);
-        } catch (ExecutionException e) {
-            // ingestOne captures all RuntimeExceptions as outcomes; anything
-            // surfacing here is unexpected (e.g. an Error).
-            throw new IngestException("Directory ingest worker failed: "
-                    + e.getCause().getMessage(), e.getCause());
-        } finally {
-            pool.shutdownNow();
-        }
+        return BatchIngestExecutor.ingestAll("dir-ingest-", parallelism, files,
+                f -> ingestOne(req, f));
     }
 
     private DirectoryFileOutcome ingestOne(DirectoryIngestRequest req, Path f) {
@@ -174,18 +141,42 @@ public class DirectoryIngestService {
      */
     public DeleteResult deleteDocument(String kbName, String docId,
                                        String sourcePath, String backend) {
+        return deleteDocument(kbName, docId, sourcePath, backend, false);
+    }
+
+    /**
+     * As above, optionally also deleting the stored source file. File deletion
+     * is only allowed via {@code doc_id}: a {@code source_path} is caller input,
+     * and letting it drive the deletion would put the caller on both sides of
+     * the containment check ({@link IngestService#deleteDocument(String,
+     * String, String, boolean)} re-locates the file from the store itself).
+     */
+    public DeleteResult deleteDocument(String kbName, String docId,
+                                       String sourcePath, String backend,
+                                       boolean deleteSource) {
         if (kbName == null || kbName.isBlank()) {
             throw new IngestException("kb_name is required");
         }
+        boolean hasDocId = docId != null && !docId.isBlank();
+        boolean hasSourcePath = sourcePath != null && !sourcePath.isBlank();
+        if (deleteSource && hasSourcePath) {
+            throw new IngestException(
+                    "delete_source=true requires doc_id and cannot be combined with "
+                            + "source_path (the file to delete is located from the store, "
+                            + "never from a caller-supplied path)");
+        }
+        if (deleteSource && !hasDocId) {
+            throw new IngestException("delete_source=true requires doc_id");
+        }
         String id;
-        if (docId != null && !docId.isBlank()) {
+        if (hasDocId) {
             id = docId;
-        } else if (sourcePath != null && !sourcePath.isBlank()) {
+        } else if (hasSourcePath) {
             id = UuidV5.forSource(kbName, canonicalSourcePath(sourcePath));
         } else {
             throw new IngestException("doc_id or source_path is required");
         }
-        return ingestService.deleteDocument(kbName, id, backend);
+        return ingestService.deleteDocument(kbName, id, backend, deleteSource);
     }
 
     /**

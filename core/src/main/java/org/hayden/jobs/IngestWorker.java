@@ -7,6 +7,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hayden.backend.qdrant.QdrantBackend;
+import org.hayden.ingest.JobSourceSnapshots;
 import org.hayden.ingest.SidecarUnavailableException;
 import org.hayden.ingest.IngestResult;
 import org.jboss.logging.Logger;
@@ -16,6 +17,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 /**
  * Background worker pool that drains the {@link IngestQueue}. Each thread
@@ -44,6 +46,9 @@ public class IngestWorker {
     @Inject
     QdrantBackend backend;
 
+    @Inject
+    JobSourceSnapshots snapshots;
+
     @ConfigProperty(name = "ingest.queue.worker_threads", defaultValue = "1")
     int workerThreads;
 
@@ -55,6 +60,7 @@ public class IngestWorker {
 
     @PostConstruct
     void start() {
+        sweepSnapshots();
         if (workerThreads <= 0) {
             LOG.info("ingest.queue.worker_threads <= 0; ingest queue will not be drained");
             return;
@@ -85,6 +91,21 @@ public class IngestWorker {
             }
         }
         LOG.info("Ingest worker stopped");
+    }
+
+    /**
+     * Drop hardlink snapshots whose job the queue no longer tracks as live
+     * (unknown, or already terminal). Live QUEUED/IN_PROGRESS jobs keep
+     * theirs — crash recovery re-reads through the link.
+     */
+    private void sweepSnapshots() {
+        if (snapshots == null) {   // hand-wired tests may omit the collaborator
+            return;
+        }
+        snapshots.sweep(queue.listJobs().stream()
+                .filter(j -> !j.status().isTerminal())
+                .map(IngestJob::jobId)
+                .collect(Collectors.toSet()));
     }
 
     /** Backoff window after a transient dependency failure: doubles from
@@ -135,19 +156,28 @@ public class IngestWorker {
                     job.jobId(), job.request().kbName(), job.docId(), job.retryCount());
             IngestResult result = backend.ingestForWorker(job);
             queue.markCompleted(job.jobId(), result);
+            releaseSnapshot(job.jobId());
             LOG.infof("Worker completed job=%s chunks=%d pages=%d",
                     job.jobId(), result.chunkCount(), result.pageCount());
             return false;
         } catch (SidecarUnavailableException e) {
             // Environment problem, not a job problem: back in line, no
             // retry penalty, and the worker slows down until it clears.
+            // The snapshot stays — the requeued job will read through it.
             queue.requeueTransient(job.jobId());
             return true;
         } catch (Exception e) {
             String message = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
             LOG.warnf("Worker failed job=%s: %s", job.jobId(), message);
             queue.markFailed(job.jobId(), message);
+            releaseSnapshot(job.jobId());   // FAILED is terminal here
             return false;
+        }
+    }
+
+    private void releaseSnapshot(String jobId) {
+        if (snapshots != null) {
+            snapshots.release(jobId);
         }
     }
 }

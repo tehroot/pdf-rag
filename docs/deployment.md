@@ -262,6 +262,36 @@ volumes:
   qdrant_data:
 ```
 
+### The `/documents` upload store mount (write-side exposure)
+
+The checked-in `docker-compose.yml` mounts a third big-storage location beside
+`QDRANT_DATA_DIR` and `PAGE_IMAGES_DIR`: `${INGEST_DOCUMENTS_DIR:-documents}`
+at `/documents`, **read-write** — the durable document store behind
+`POST /ingest/upload` (see
+[components/upload-ingest.md](components/upload-ingest.md)). Unlike `/docs`
+and `/host` (both read-only), this is the corpus of record: uploaded files
+stay until an operator deletes them, queued visual jobs re-read them, and
+`POST /ingest/directory` over `/documents/<kb>` re-indexes them.
+
+On a ZFS host, give it its own dataset with a quota so a fill cannot starve
+the Qdrant storage on the same pool:
+
+```bash
+zfs create -o recordsize=1M -o compression=lz4 -o quota=200G tank/documents
+# .env: INGEST_DOCUMENTS_DIR=/tank/documents
+```
+
+`recordsize=1M` suits whole-file PDF reads; `lz4` is close to free. The quota
+is not a suggestion: the REST surface has **no auth** and CORS defaults to
+`*`, and this endpoint is the first that *writes* caller-controlled bytes to
+permanent server storage — anyone who reaches `:8080` can consume pool
+capacity. Path confinement, per-request caps, and the free-space reserve are
+v1 mitigations; the real mitigation is network isolation. The container runs
+as root, so stored files are `root:root` on the tank (set `user:` on the
+service to change that). `ingest.upload.require_mount=true` (default) makes
+the server refuse uploads when `/documents` is not actually a mount — a
+missing bind would otherwise silently store the corpus inside the container.
+
 ### systemd unit for the HTTP transport
 
 ```ini

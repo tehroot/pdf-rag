@@ -45,4 +45,44 @@ else
 fi
 
 echo
+info "upload ingest (POST /ingest/upload)"
+# A minimal one-page PDF, generated on the fly. ingest=false keeps this a
+# wiring check (store + doc-id assignment) with no dependency on the
+# embedding pipeline being warm.
+SMOKE_PDF="$(mktemp 2>/dev/null || echo /tmp/pdf-rag-smoke-pdf.$$)"
+printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>endobj\nxref\n0 4\ntrailer<</Size 4/Root 1 0 R>>\n%%%%EOF\n' > "$SMOKE_PDF"
+UP_RESP="$(curl -s -m 30 -X POST "$BASE/ingest/upload" \
+  -F kb_name=__smoke__ -F ingest=false -F "files=@$SMOKE_PDF;filename=smoke.pdf" 2>/dev/null || true)"
+rm -f "$SMOKE_PDF"
+if printf '%s' "$UP_RESP" | grep -q '"status":"stored"'; then
+  ok "POST /ingest/upload stores a file"
+else
+  err "POST /ingest/upload (got: ${UP_RESP:-no response})"; FAILED=1
+fi
+SMOKE_DOC_ID="$(printf '%s' "$UP_RESP" | sed -n 's/.*"doc_id":"\([^"]*\)".*/\1/p' | head -1)"
+# Proof the file is really in the store: a second upload of the same name
+# with on_conflict=reject must fail per-file with "already exists".
+SMOKE_PDF2="$(mktemp 2>/dev/null || echo /tmp/pdf-rag-smoke-pdf2.$$)"
+printf '%%PDF-1.4 second copy\n' > "$SMOKE_PDF2"
+RE_RESP="$(curl -s -m 30 -X POST "$BASE/ingest/upload" \
+  -F kb_name=__smoke__ -F ingest=false -F on_conflict=reject \
+  -F "files=@$SMOKE_PDF2;filename=smoke.pdf" 2>/dev/null || true)"
+rm -f "$SMOKE_PDF2"
+if printf '%s' "$RE_RESP" | grep -q 'on_conflict=reject'; then
+  ok "stored file exists (re-upload with on_conflict=reject refused)"
+else
+  err "upload store existence check (got: ${RE_RESP:-no response})"; FAILED=1
+fi
+# Clean up: delete_source removes both the (empty) index entry and the file.
+if [ -n "$SMOKE_DOC_ID" ]; then
+  DEL_RESP="$(curl -s -m 10 -X DELETE \
+    "$BASE/ingest/document?kb_name=__smoke__&doc_id=$SMOKE_DOC_ID&delete_source=true" 2>/dev/null || true)"
+  if printf '%s' "$DEL_RESP" | grep -q 'Source file deleted'; then
+    ok "DELETE /ingest/document?delete_source=true removes the stored file"
+  else
+    err "delete_source cleanup (got: ${DEL_RESP:-no response})"; FAILED=1
+  fi
+fi
+
+echo
 if [ "$FAILED" = "0" ]; then ok "smoke passed"; else die "smoke FAILED"; fi

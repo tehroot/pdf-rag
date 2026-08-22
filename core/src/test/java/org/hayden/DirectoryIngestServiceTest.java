@@ -164,6 +164,24 @@ class DirectoryIngestServiceTest {
     }
 
     @Test
+    void delete_deleteSourceCombinedWithSourcePath_isRejected() {
+        // source_path is caller input; letting it drive a file deletion would
+        // put the caller on both sides of the containment comparison.
+        assertThatThrownBy(() -> service.deleteDocument(
+                "docs", null, "/x/a.pdf", null, true))
+                .isInstanceOf(IngestException.class)
+                .hasMessageContaining("delete_source");
+    }
+
+    @Test
+    void delete_deleteSourceWithoutDocId_isRejected() {
+        assertThatThrownBy(() -> service.deleteDocument(
+                "docs", null, null, null, true))
+                .isInstanceOf(IngestException.class)
+                .hasMessageContaining("requires doc_id");
+    }
+
+    @Test
     void missingKbName_throws() {
         assertThatThrownBy(() -> service.ingestDirectory(new DirectoryIngestRequest(
                 root.toString(), "  ", null, null, null, null, null, null)))

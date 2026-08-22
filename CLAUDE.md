@@ -95,8 +95,13 @@ core/src/main/java/org/hayden/
 │   ├── IngestResult / SearchResponse / SearchHit / InspectPageResult / PageText / DropVisualIndexResult
 │   ├── DirectoryIngestService.java     # scan a dir → per-file ingest (REST endpoint backs onto this)
 │   ├── DirectoryIngestRequest / DirectoryIngestResponse / DirectoryFileOutcome
+│   ├── UploadIngestService.java        # POST /ingest/upload orchestration: store → per-file ingest
+│   ├── UploadedDocumentStore.java      # durable store: sanitize, atomic write, conflicts, ZIP, delete
+│   ├── JobSourceSnapshots.java         # hardlink-pin a queued job's bytes; released on terminal status
+│   ├── BatchIngestExecutor.java        # shared bounded-parallel fan-out (directory + upload)
+│   ├── UploadIngestRequest / UploadIngestResponse
 │   ├── FileFetcher.java                # url / path / inline → FetchedFile (shared)
-│   └── IngestException.java
+│   └── IngestException.java            # + SourceConflict(409) / InsufficientStorage(507) / PayloadTooLarge(413) subtypes
 ├── jobs/
 │   ├── IngestJob.java                  # record: status + request + result + retry counter
 │   ├── JobStatus.java                  # enum: QUEUED / IN_PROGRESS / COMPLETED / FAILED
@@ -149,8 +154,11 @@ core/src/main/java/org/hayden/
 
 `server-http` additionally exposes a plain REST surface (`org.hayden.rest.*`,
 `quarkus-rest-jackson`) for bulk/operational use: `POST /ingest/directory`,
+`POST /ingest/upload` (multipart push into the durable `/documents` store;
+see [docs/components/upload-ingest.md](docs/components/upload-ingest.md)),
 `GET /ingest/status/{jobId}`, `GET /ingest/jobs` (list, `?status=` filter),
-`DELETE /ingest/document` (by `doc_id` or `source_path`), plus KB status on
+`DELETE /ingest/document` (by `doc_id` or `source_path`; add
+`&delete_source=true` — `doc_id` only — to also remove the stored file), plus KB status on
 `GET /kb` (listing with per-KB + total distinct-document counts via the
 Qdrant facet API), `GET /kb/{name}`, and `DELETE /kb/{name}?confirm=true`
 (full teardown: chunk + pages collections, page images, queued jobs). Logic is in `core`
@@ -321,6 +329,16 @@ sequence-bucket pooling (dynamic resolution, no square grid) and the
   `ColPaliPipeline.isEnabledFor(kbName)` calls `qdrant.getCollection(<kb>_pages)
   != null`. No separate metadata store.
 
+- **Uploads are durable; `/documents` is the corpus of record.** There is no
+  reaper and no retention window — `POST /ingest/upload` writes to a permanent
+  store that queued jobs re-read and re-indexes depend on. Never "clean up"
+  `/documents` in code; deletion is `DELETE /ingest/document?delete_source=true`
+  (doc_id only) or an operator. Related invariants: `kb_name` is validated as a
+  single path segment BEFORE any path is built; a queued visual job's persisted
+  request points at a hardlink under `<root>/.jobs/<jobId>/` so a replace-upload
+  can't swap its bytes; and `QdrantBackend.doIngest` holds a per-doc-id lock
+  across deleteDoc + write — don't "simplify" any of these away.
+
 - **Multivector upserts MUST stay batched small.** A ColQwen2-class page point
   is ~1.5–2 MB as JSON (original + pooled multivectors) and Qdrant rejects
   request bodies over its ~32 MB cap — an unbatched multi-page upsert fails
@@ -360,6 +378,19 @@ Env vars (consumed via `@ConfigProperty`, see
 | `INGEST_QDRANT_UPSERT_BATCH` | chunk points per Qdrant upsert call (text side) | `128` |
 | `INGEST_QDRANT_MULTIVECTOR_UPSERT_BATCH` | page points per multivector upsert (visual side; see gotcha) | `8` |
 | `INGEST_DIRECTORY_PARALLELISM` | files ingested concurrently per `POST /ingest/directory` | `4` |
+| `INGEST_UPLOAD_ROOT` | upload document store root (container: `/documents`) | `~/.pdf-rag-ingest/documents` |
+| `INGEST_DOCUMENTS_DIR` | compose volume/bind for `/documents` (R530: `/tank/documents`) | `documents` |
+| `INGEST_UPLOAD_PARALLELISM` | files ingested concurrently per `POST /ingest/upload` | `4` |
+| `INGEST_UPLOAD_MAX_FILES` | parts accepted per upload request | `200` |
+| `INGEST_UPLOAD_MAX_REQUEST_BYTES` | app-level request cap; keep equal to `UPLOAD_MAX_BODY_SIZE` | `2147483648` |
+| `INGEST_UPLOAD_MIN_FREE_BYTES` | store free-space reserve (breach → HTTP 507) | `10737418240` |
+| `INGEST_UPLOAD_FSYNC` | fsync each stored file before the atomic rename | `true` |
+| `INGEST_UPLOAD_REQUIRE_MOUNT` | refuse uploads when the root isn't a mount point | `true` |
+| `INGEST_UPLOAD_ZIP_ENABLED` | expand uploaded `.zip` parts | `true` |
+| `INGEST_UPLOAD_ZIP_MAX_ENTRIES` | entries per archive | `500` |
+| `INGEST_UPLOAD_ZIP_MAX_UNCOMPRESSED_BYTES` | zip-bomb cap | `2147483648` |
+| `UPLOAD_MAX_BODY_SIZE` | Quarkus HTTP body cap (primary 413 defence; server-http) | `2G` |
+| `UPLOAD_TMP_DIR` | multipart temp dir — must share the store's dataset | `<root>/.tmp`; compose: `/documents/.tmp` |
 | `COLPALI_PREFETCH_MULTIPLIER` | multistage prefetch = N × top_k | `10` |
 | `INGEST_SEARCH_DEBUG_CANDIDATES` | log candidate lists + scores at INFO | `false` |
 | `INGEST_SEARCH_DEDUP` | collapse overlapping chunks in results | `true` |

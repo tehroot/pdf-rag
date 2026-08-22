@@ -33,6 +33,21 @@ INBOX="$(env_or INGEST_INBOX "$ROOT/incoming")"
 mkdir -p "$INBOX"
 ok "inbox ready: $INBOX  (drop files here, then ingest by path /docs/<file>)"
 
+# 2b. Document store for POST /ingest/upload (compose mounts
+#     $INGEST_DOCUMENTS_DIR at /documents, read-write). The default is a
+#     docker named volume — nothing to create; only a bind path (leading /
+#     or ./) needs the host directory to exist.
+DOCS_DIR="$(env_or INGEST_DOCUMENTS_DIR documents)"
+case "$DOCS_DIR" in
+  /*|./*)
+    mkdir -p "$DOCS_DIR"
+    ok "document store ready: $DOCS_DIR  (uploads land here, permanently)"
+    ;;
+  *)
+    ok "document store uses docker named volume '$DOCS_DIR' (set INGEST_DOCUMENTS_DIR to a path for a bind mount, e.g. /tank/documents)"
+    ;;
+esac
+
 # 3. Embedding model GGUF for llama-server (bind-mounted from ./models).
 MODEL_FILE="$(env_or LLAMA_MODEL_FILE bge-small-en-v1.5-f16.gguf)"
 mkdir -p "$ROOT/models"
