@@ -813,6 +813,86 @@ class QdrantBackendTest {
         }
     }
 
+    // ---- per-doc-id write serialization -------------------------------------
+
+    @Test
+    void concurrentIngest_sameDocId_serializesDeleteAndWrite() throws Exception {
+        // Deterministic doc ids let two writers (upload batch + directory scan
+        // over one tree) target the same id at once. doIngest is delete-then-
+        // write; interleaved, the second's delete removes points the first
+        // just wrote. The per-doc-id lock must keep each delete+write whole.
+        java.util.List<String> events =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        java.util.concurrent.CountDownLatch firstInside =
+                new java.util.concurrent.CountDownLatch(1);
+
+        ChunkPipeline recordingChunks = new ChunkPipeline() {
+            @Override
+            public boolean deleteDoc(String kbName, String docId) {
+                events.add("delete");
+                return true;
+            }
+
+            @Override
+            public IngestResult ingestChunks(IngestRequest req,
+                                             org.hayden.ingest.FetchedFile file,
+                                             String docId) {
+                events.add("write-start");
+                firstInside.countDown();
+                try {
+                    Thread.sleep(150);   // window for the other writer to collide
+                } catch (InterruptedException ignored) {
+                }
+                events.add("write-end");
+                return new IngestResult("qdrant", req.kbName(), req.kbName(), docId,
+                        "completed", 1, 0, true, "ok", List.of(), null);
+            }
+
+            @Override
+            public boolean collectionExists(String kbName) {
+                return false;
+            }
+        };
+        ColPaliPipeline noVisual = new ColPaliPipeline() {
+            @Override
+            public boolean isEnabledFor(String kbName) {
+                return false;
+            }
+        };
+
+        FileFetcher fetcher = new FileFetcher();
+        setField(fetcher, "maxFileBytes", 1024L * 1024);
+        setField(fetcher, "connectTimeoutSeconds", 5L);
+        setField(fetcher, "requestTimeoutSeconds", 10L);
+        invokeInit(fetcher);
+
+        QdrantBackend racy = new QdrantBackend();
+        setField(racy, "fetcher", fetcher);
+        setField(racy, "chunks", recordingChunks);
+        setField(racy, "pages", noVisual);
+        setField(racy, "defaultVisualIndexEnabled", false);
+        setField(racy, "syncThresholdPages", Integer.MAX_VALUE);
+
+        String b64 = Base64.getEncoder().encodeToString("same doc".getBytes());
+        IngestRequest req = new IngestRequest(
+                SourceType.INLINE, b64, "a.txt", "docs", null, 0L, "qdrant", null, false);
+
+        Thread first = new Thread(() -> racy.ingest(req, "shared-doc-id"));
+        first.start();
+        assertThat(firstInside.await(2, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        // The first writer is mid-write; the second must now wait at the lock.
+        Thread second = new Thread(() -> racy.ingest(req, "shared-doc-id"));
+        second.start();
+        first.join(5000);
+        second.join(5000);
+
+        // Two whole delete+write sections, never interleaved — the second's
+        // delete must not land between the first's delete and write.
+        assertThat(events).containsExactly(
+                "delete", "write-start", "write-end",
+                "delete", "write-start", "write-end");
+    }
+
     // ---- helpers ------------------------------------------------------------
 
     /** Builds a backend with the visual path fully wired (sidecar + image store). */

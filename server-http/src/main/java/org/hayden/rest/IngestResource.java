@@ -111,7 +111,12 @@ public class IngestResource {
     @Operation(summary = "Delete a document",
             description = "Remove a document from a KB by doc_id, or by source_path (the absolute "
                     + "path it was ingested from, resolved to the same deterministic id the "
-                    + "directory scan assigned). Idempotent.")
+                    + "directory scan assigned). Idempotent. delete_source=true also removes the "
+                    + "backing file from the upload store — doc_id only (combining it with "
+                    + "source_path is a 400), and only files under the store root are ever "
+                    + "deleted; anything else keeps its file and the result carries a warning.")
+    @APIResponse(responseCode = "400",
+            description = "Missing identifiers, or delete_source combined with source_path")
     public DeleteResult deleteDocument(
             @Parameter(description = "Target knowledge base / collection name")
             @QueryParam("kb_name") String kbName,
@@ -120,7 +125,10 @@ public class IngestResource {
             @Parameter(description = "Absolute source path the document was ingested from")
             @QueryParam("source_path") String sourcePath,
             @Parameter(description = "Backend override; defaults to the configured INGEST_BACKEND")
-            @QueryParam("backend") String backend) {
-        return directoryIngest.deleteDocument(kbName, docId, sourcePath, backend);
+            @QueryParam("backend") String backend,
+            @Parameter(description = "Also delete the stored source file (requires doc_id; "
+                    + "only paths under the upload store root are removed)")
+            @QueryParam("delete_source") @jakarta.ws.rs.DefaultValue("false") boolean deleteSource) {
+        return directoryIngest.deleteDocument(kbName, docId, sourcePath, backend, deleteSource);
     }
 }

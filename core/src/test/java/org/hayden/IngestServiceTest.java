@@ -125,6 +125,44 @@ class IngestServiceTest {
                 .isEqualTo("Notes");
     }
 
+    // ---- delete_source ------------------------------------------------------
+
+    @org.junit.jupiter.api.Test
+    void deleteSource_removesStoredFile_whenDocIdMapsIntoTheUploadRoot(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path base) throws Exception {
+        java.nio.file.Path root = base.resolve("documents");
+        var store = UploadedDocumentStoreTest.newStore(root, root.resolve(".tmp"));
+        setField(service, "documentStore", store);
+        var stored = store.store("docs", null, "a.txt",
+                java.nio.file.Files.writeString(root.resolve(".tmp").resolve("body"), "x"),
+                org.hayden.ingest.UploadedDocumentStore.Conflict.REPLACE,
+                org.hayden.ingest.UploadedDocumentStore.ReplaceGuard.NONE, 1);
+        String docId = org.hayden.backend.qdrant.UuidV5.forSource("docs",
+                org.hayden.ingest.DirectoryIngestService.canonicalSourcePath(stored.path()));
+
+        var r = service.deleteDocument("docs", docId, "qdrant", true);
+
+        assertThat(qdrant.deletedDocId).isEqualTo(docId);
+        assertThat(r.message()).contains("Source file deleted");
+        assertThat(java.nio.file.Files.exists(stored.path())).isFalse();
+    }
+
+    @org.junit.jupiter.api.Test
+    void deleteSource_docNotInStore_deletesPointsOnly_withWarning(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path base) throws Exception {
+        // A doc ingested from /docs or /host has no file under the upload
+        // root — findByDocId comes back empty, points still go, the file (not
+        // ours to manage) stays, and the result says so.
+        var store = UploadedDocumentStoreTest.newStore(
+                base.resolve("documents"), base.resolve("documents/.tmp"));
+        setField(service, "documentStore", store);
+
+        var r = service.deleteDocument("docs", "some-external-doc-id", "qdrant", true);
+
+        assertThat(qdrant.deletedDocId).isEqualTo("some-external-doc-id");
+        assertThat(r.message()).contains("never deleted");
+    }
+
     private static IngestRequest req(String backend) {
         return new IngestRequest(SourceType.URL, "https://example.com/x.txt", "x.txt",
                 "docs", null, 30L, backend, null);
@@ -141,6 +179,7 @@ class IngestServiceTest {
         int ingestCalls;
         int searchCalls;
         boolean failOnList;
+        String deletedDocId;
         final List<KnowledgeBaseSummary> kbs = new ArrayList<>();
 
         FakeBackend(String name) {
@@ -168,6 +207,13 @@ class IngestServiceTest {
                 throw new RuntimeException("simulated backend failure");
             }
             return kbs;
+        }
+
+        @Override
+        public org.hayden.ingest.DeleteResult deleteDocument(String kbName, String docId) {
+            deletedDocId = docId;
+            return new org.hayden.ingest.DeleteResult(name, kbName, docId,
+                    true, false, 0, "deleted");
         }
     }
 

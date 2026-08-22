@@ -179,6 +179,15 @@ services:
       # Page-image storage (rendered PNGs for inspect_page)
       INGEST_PAGE_STORE_ROOT: /var/lib/pdf-rag-ingest/page-images
 
+      # Upload document store (POST /ingest/upload). /documents is the
+      # read-write mount below; the multipart temp dir sits inside it so the
+      # atomic-rename store path never crosses filesystems. The body cap is
+      # the primary upload size defence (413) — keep it equal to
+      # ingest.upload.max_request_bytes if you override either.
+      INGEST_UPLOAD_ROOT: /documents
+      UPLOAD_TMP_DIR: /documents/.tmp
+      UPLOAD_MAX_BODY_SIZE: ${UPLOAD_MAX_BODY_SIZE:-2G}
+
       # Fusion config
       FUSION_STRATEGY: ${FUSION_STRATEGY:-rrf}
 
@@ -201,6 +210,14 @@ services:
       # the bulkiest artifact (~1 MB/page) — onto big storage.
       - ${PAGE_IMAGES_DIR:-page-images}:/var/lib/pdf-rag-ingest/page-images
       - ${INGEST_QUEUE_DIR:-ingest-queue}:/var/lib/pdf-rag-ingest/queue
+      # Durable document store for POST /ingest/upload — the corpus of record,
+      # read-WRITE (the first writable mount on this service). Same named-
+      # volume-or-bind pattern as QDRANT_DATA_DIR: set
+      # INGEST_DOCUMENTS_DIR=/tank/documents to put it on a ZFS dataset
+      # (recommended: its own dataset with a quota, so a fill can't starve
+      # the qdrant storage). Files are written root:root; set user: on this
+      # service if you need different ownership.
+      - ${INGEST_DOCUMENTS_DIR:-documents}:/documents
       # Host inbox for documents the agent can ingest via source_type=path.
       # Useful when a target URL is fronted by a CDN (akamai/cloudflare) that
       # rejects server-side fetches — scp/cp the file in, then say "ingest
@@ -225,3 +242,4 @@ volumes:
   hf-cache:
   page-images:
   ingest-queue:
+  documents:

@@ -24,6 +24,9 @@ public class IngestService {
     @Inject
     Instance<Backend> backends;
 
+    @Inject
+    UploadedDocumentStore documentStore;
+
     @ConfigProperty(name = "ingest.backend.default")
     String defaultBackend;
 
@@ -47,6 +50,34 @@ public class IngestService {
     /** Delete a document from a KB on the chosen (or default) backend. */
     public DeleteResult deleteDocument(String kbName, String docId, String backendName) {
         return pick(backendName).deleteDocument(kbName, docId);
+    }
+
+    /**
+     * As above, optionally deleting the document's stored source file too.
+     * The file is located by walking the upload store for the doc id — never
+     * from a caller-supplied path — and only paths under
+     * {@code ingest.upload.root} are ever deleted: a doc ingested from the
+     * read-only {@code /docs} / {@code /host} mounts keeps its file and the
+     * result message says so.
+     */
+    public DeleteResult deleteDocument(String kbName, String docId, String backendName,
+                                       boolean deleteSource) {
+        DeleteResult r = deleteDocument(kbName, docId, backendName);
+        if (!deleteSource) {
+            return r;
+        }
+        String suffix;
+        var stored = documentStore.findByDocId(kbName, docId);
+        if (stored.isPresent() && documentStore.deleteStored(stored.get())) {
+            suffix = " Source file deleted: " + stored.get() + ".";
+        } else {
+            suffix = " Warning: no stored source file under "
+                    + documentStore.rootDir() + " for this doc_id "
+                    + "(files outside the upload store are never deleted).";
+        }
+        return new DeleteResult(r.backend(), r.kbName(), r.docId(),
+                r.textPointsDeleted(), r.visualPointsDeleted(), r.imagesRemoved(),
+                r.message() + suffix);
     }
 
     /** Delete an entire KB on the chosen (or default) backend. */
