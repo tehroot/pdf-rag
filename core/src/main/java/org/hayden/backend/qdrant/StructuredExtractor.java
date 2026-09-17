@@ -14,6 +14,7 @@ import org.apache.tika.parser.ParseContext;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hayden.ingest.FetchedFile;
 import org.hayden.ingest.IngestException;
+import org.hayden.ingest.NoTextLayerException;
 import org.xml.sax.Attributes;
 import org.xml.sax.SAXException;
 import org.xml.sax.helpers.DefaultHandler;
@@ -263,7 +264,7 @@ public class StructuredExtractor {
     private List<Block> extractPdfBlocks(FetchedFile file) {
         List<Line> lines = collectLines(file);
         if (lines.isEmpty()) {
-            throw new IngestException("PDFBox extracted no text from " + file.filename()
+            throw new NoTextLayerException("PDFBox extracted no text from " + file.filename()
                     + " (likely a scanned PDF without a text layer; "
                     + "ColPali / OCR is required to read it)");
         }

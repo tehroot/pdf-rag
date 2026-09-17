@@ -713,6 +713,62 @@ class QdrantBackendTest {
     }
 
     @Test
+    void ingest_noTextLayerPdf_visualRequested_queuesVisualWithZeroChunks() throws Exception {
+        java.nio.file.Path tmpRoot = java.nio.file.Files.createTempDirectory("qb-notext-");
+        try {
+            QdrantBackend visualBackend = newBackendWithVisual(mock.baseUrl(), tmpRoot);
+            setField(visualBackend, "syncThresholdPages", 1);
+
+            mock.stubFor(get(urlEqualTo("/healthz"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"status\":\"ok\",\"ready\":true}")));
+            mock.stubFor(get(urlEqualTo("/info"))
+                    .willReturn(aResponse().withStatus(200).withBody("""
+                            {"model_name":"vidore/colqwen2-v1.0","vector_dim":2,
+                             "supports_pooled":true,"max_batch_size":8,"device":"cpu"}""")));
+            mock.stubFor(get(urlEqualTo("/collections/v-kb"))
+                    .willReturn(aResponse().withStatus(404)));
+            mock.stubFor(get(urlEqualTo("/collections/v-kb_pages"))
+                    .willReturn(aResponse().withStatus(404)));
+            mock.stubFor(put(urlEqualTo("/collections/v-kb"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+            mock.stubFor(put(urlEqualTo("/collections/v-kb_pages"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+
+            String b64 = Base64.getEncoder().encodeToString(makeBlankPdf(2));
+            IngestResult r = visualBackend.ingest(new IngestRequest(
+                    SourceType.INLINE, b64, "scan.pdf",
+                    "v-kb", null, 0L, "qdrant", null, true));
+
+            // No text layer is not a failure when the visual side is on:
+            // zero chunks, visual job queued.
+            assertThat(r.processingStatus()).isEqualTo("queued");
+            assertThat(r.jobId()).isNotNull();
+            assertThat(r.chunkCount()).isZero();
+            mock.verify(0, putRequestedFor(urlPathEqualTo("/collections/v-kb/points")));
+            mock.verify(0, postRequestedFor(urlEqualTo("/v1/embeddings")));
+
+            IngestQueue queue = (IngestQueue) getField(visualBackend, "queue");
+            var job = queue.take(100, java.util.concurrent.TimeUnit.MILLISECONDS).orElseThrow();
+            assertThat(job.effectiveKind()).isEqualTo(org.hayden.jobs.JobKind.VISUAL);
+        } finally {
+            deleteTree(tmpRoot);
+        }
+    }
+
+    @Test
+    void ingest_noTextLayerPdf_textOnly_stillFails() throws Exception {
+        mock.stubFor(get(urlEqualTo("/collections/t-kb"))
+                .willReturn(aResponse().withStatus(404)));
+        mock.stubFor(put(urlEqualTo("/collections/t-kb"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+        String b64 = Base64.getEncoder().encodeToString(makeBlankPdf(1));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> backend.ingest(new IngestRequest(
+                SourceType.INLINE, b64, "scan.pdf",
+                "t-kb", null, 0L, "qdrant", null, false)))
+                .isInstanceOf(org.hayden.ingest.NoTextLayerException.class);
+    }
+
+    @Test
     void ingestForWorker_visualJob_runsOnlyVisualSide() throws Exception {
         java.nio.file.Path tmpRoot = java.nio.file.Files.createTempDirectory("qb-split-");
         try {
@@ -942,6 +998,19 @@ class QdrantBackendTest {
         Field f = target.getClass().getDeclaredField(name);
         f.setAccessible(true);
         return f.get(target);
+    }
+
+    /** Pages with no content stream at all: what a scanned PDF looks like to PDFBox. */
+    private static byte[] makeBlankPdf(int numPages) throws java.io.IOException {
+        try (org.apache.pdfbox.pdmodel.PDDocument doc = new org.apache.pdfbox.pdmodel.PDDocument()) {
+            for (int i = 1; i <= numPages; i++) {
+                doc.addPage(new org.apache.pdfbox.pdmodel.PDPage(
+                        org.apache.pdfbox.pdmodel.common.PDRectangle.LETTER));
+            }
+            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+            doc.save(baos);
+            return baos.toByteArray();
+        }
     }
 
     private static byte[] makeTinyPdf(int numPages) throws java.io.IOException {

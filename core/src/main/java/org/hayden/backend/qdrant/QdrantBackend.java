@@ -18,10 +18,12 @@ import org.hayden.ingest.IngestResult;
 import org.hayden.ingest.JobSourceSnapshots;
 import org.hayden.ingest.SearchRequest;
 import org.hayden.ingest.SearchResponse;
+import org.hayden.ingest.NoTextLayerException;
 import org.hayden.ingest.SidecarUnavailableException;
 import org.hayden.jobs.IngestJob;
 import org.hayden.jobs.IngestQueue;
 import org.hayden.jobs.JobKind;
+import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -51,6 +53,8 @@ import java.util.concurrent.locks.ReentrantLock;
 public class QdrantBackend implements Backend {
 
     public static final String NAME = "qdrant";
+
+    private static final Logger LOG = Logger.getLogger(QdrantBackend.class);
 
     @Inject
     FileFetcher fetcher;
@@ -160,7 +164,7 @@ public class QdrantBackend implements Backend {
             DocLock docLock = acquireDocLock(docId);
             try {
                 chunks.deleteDoc(req.kbName(), docId);
-                chunkResult = chunks.ingestChunks(req, file, docId);
+                chunkResult = ingestChunksOrNoText(req, file, docId, visualRequested);
             } finally {
                 releaseDocLock(docId, docLock);
             }
@@ -238,6 +242,30 @@ public class QdrantBackend implements Backend {
                 null);
     }
 
+    /**
+     * Run the chunk side. A document with no extractable text (scanned PDF,
+     * no text layer) is a hard failure for a text-only ingest, but with a
+     * visual index requested it is the case the page embeddings exist for:
+     * skip the chunks and let the visual side run. Before this, a directory
+     * ingest of a bulk scanned corpus rejected every such file outright
+     * (524 of ~12k DTIC reports skipped on the R530, 2026-09-17).
+     */
+    private IngestResult ingestChunksOrNoText(IngestRequest req, FetchedFile file,
+                                              String docId, boolean visualRequested) {
+        try {
+            return chunks.ingestChunks(req, file, docId);
+        } catch (NoTextLayerException e) {
+            if (!visualRequested || !isPdf(file)) {
+                throw e;
+            }
+            LOG.infof("No text layer in %s (doc=%s); 0 chunks, visual side only", file.filename(), docId);
+            return new IngestResult(NAME, req.kbName(), req.kbName(), docId, "completed",
+                    0, 0, true,
+                    "No text layer (" + e.getMessage() + "); 0 chunks ingested, visual side only",
+                    List.of(), null);
+        }
+    }
+
     /** The actual ingest work. Shared by sync path and worker path. */
     IngestResult doIngest(IngestRequest req, FetchedFile file, String docId,
                           boolean visualRequested) {
@@ -259,8 +287,9 @@ public class QdrantBackend implements Backend {
                 pages.deleteDoc(req.kbName(), docId);
             }
 
-            // Text ingest always runs.
-            chunkResult = chunks.ingestChunks(req, file, docId);
+            // Text ingest always runs — except that a PDF with no text layer
+            // contributes zero chunks and proceeds to the visual side.
+            chunkResult = ingestChunksOrNoText(req, file, docId, visualRequested);
 
             if (visualRequested) {
                 if (isPdf(file)) {
