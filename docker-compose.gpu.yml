@@ -39,6 +39,36 @@ services:
       # activations). Must be >= the client's COLPALI_BATCH_SIZE below —
       # the sidecar 400-rejects requests over this cap.
       COLPALI_MAX_BATCH_SIZE: ${COLPALI_MAX_BATCH_SIZE:-16}
+      # PyTorch's caching allocator otherwise grows to the whole card and
+      # starves llama-server below (observed: 20,062 of 20,470 MiB on an
+      # A4500 at batch 16). expandable_segments lets it hand segments back.
+      # See docs/plans/gpu-text-embedder-v1.md.
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  llama-server:
+    # Text embedder on the GPU. bge-small is 67 MB in f16; with the CUDA
+    # context and 4 slots of KV it needs ~0.5 GB. On the CPU it burned 20
+    # cores at 2000% and capped text ingest at ~4 docs/min (R530, 2026-09-17).
+    # `command` is a scalar, so compose replaces it: repeat the base flags.
+    # The sidecar must leave headroom — see PYTORCH_CUDA_ALLOC_CONF above and
+    # COLPALI_MAX_BATCH_SIZE in .env. docs/plans/gpu-text-embedder-v1.md.
+    image: ${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    command: >
+      -m /models/${LLAMA_MODEL_FILE:-bge-small-en-v1.5-f16.gguf}
+      --embeddings
+      --host 0.0.0.0
+      --port 8081
+      --ctx-size ${LLAMA_CTX_SIZE:-8192}
+      --parallel ${LLAMA_PARALLEL:-4}
+      --cont-batching
+      --n-gpu-layers ${LLAMA_GPU_LAYERS:-99}
     deploy:
       resources:
         reservations:

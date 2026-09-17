@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -77,24 +78,32 @@ public class QdrantBackend implements Backend {
      * lock is held across a document's whole delete + write critical section
      * by every entry point (sync ingest, split-queue submit, worker).
      *
-     * <p>A FIXED stripe array, not a map keyed on doc id: a map would retain
-     * one lock per distinct id for the process lifetime, and a bulk corpus
-     * (94k docs on the R530) makes that an unbounded, caller-driven leak.
-     * Striping bounds the lock set at {@value #DOC_LOCK_STRIPES}; the cost is
-     * that two unrelated doc ids can share a stripe and serialize
-     * needlessly, which is harmless — ingest is I/O-bound on Qdrant and the
-     * embedder, and collisions are rare at this width. Single-process is the
+     * <p>One lock per doc id, reference-counted, NOT a fixed stripe array.
+     * The earlier 64-stripe design assumed collisions were harmless because
+     * ingest was I/O-bound. That stopped being true once the visual lane
+     * held its stripe across render + VLM embed: a 400-page job holds a
+     * stripe for minutes, and any text ingest whose id hashes to that stripe
+     * waits the whole time (observed on the R530 with the DTIC corpus,
+     * 2026-09-17: one file in a 40-file directory batch waited 16 min behind
+     * an unrelated visual job; with 5 workers on 64 stripes about one file
+     * in twelve collided). Unrelated documents must never serialize.
+     *
+     * <p>The map is bounded by the number of doc ids with a holder or waiter
+     * RIGHT NOW, not by corpus size: {@link #acquireDocLock} bumps a per-id
+     * reference count under {@code ConcurrentHashMap.compute} (atomic per
+     * key), and {@link #releaseDocLock} decrements it and drops the entry at
+     * zero under {@code computeIfPresent}. A new arrival between the last
+     * holder's unlock and the removal still finds the same entry (its
+     * compute runs before or after the removal, never interleaved), so two
+     * callers on one id always share one lock. Single-process is the
      * deployment, so no distributed lock.
      */
-    private static final int DOC_LOCK_STRIPES = 64;
-    private final ReentrantLock[] docLocks = createStripes();
+    private final ConcurrentHashMap<String, DocLock> docLocks = new ConcurrentHashMap<>();
 
-    private static ReentrantLock[] createStripes() {
-        ReentrantLock[] stripes = new ReentrantLock[DOC_LOCK_STRIPES];
-        for (int i = 0; i < stripes.length; i++) {
-            stripes[i] = new ReentrantLock();
-        }
-        return stripes;
+    /** A lock plus the number of threads that currently hold or wait for it. */
+    private static final class DocLock {
+        final ReentrantLock lock = new ReentrantLock();
+        int refs;   // guarded by the map's per-key compute atomicity
     }
 
     @ConfigProperty(name = "ingest.visual_index.default_enabled", defaultValue = "true")
@@ -148,13 +157,12 @@ public class QdrantBackend implements Backend {
             pages.ensureCollectionFor(req.kbName());
 
             IngestResult chunkResult;
-            ReentrantLock lock = lockFor(docId);
-            lock.lock();
+            DocLock docLock = acquireDocLock(docId);
             try {
                 chunks.deleteDoc(req.kbName(), docId);
                 chunkResult = chunks.ingestChunks(req, file, docId);
             } finally {
-                lock.unlock();
+                releaseDocLock(docId, docLock);
             }
 
             // Pin the bytes the queued job will read: the persisted request
@@ -207,14 +215,13 @@ public class QdrantBackend implements Backend {
                             + "' but the ColPali sidecar is unreachable.");
         }
         ColPaliPipeline.PagesIngestResult pagesResult;
-        ReentrantLock lock = lockFor(docId);
-        lock.lock();
+        DocLock docLock = acquireDocLock(docId);
         try {
             // Replace semantics for retries: discard a previous partial attempt.
             pages.deleteDoc(req.kbName(), docId);
             pagesResult = pages.ingestPages(req, file, docId);
         } finally {
-            lock.unlock();
+            releaseDocLock(docId, docLock);
         }
         return new IngestResult(
                 NAME,
@@ -240,8 +247,7 @@ public class QdrantBackend implements Backend {
         // The whole delete + write is one critical section per doc id: a
         // concurrent writer on the same deterministic id (upload + directory
         // scan over one tree) must not delete points this call just wrote.
-        ReentrantLock lock = lockFor(docId);
-        lock.lock();
+        DocLock docLock = acquireDocLock(docId);
         try {
             // Replace semantics: clear any prior copy of this docId before writing.
             // For directory re-scans (deterministic ids) this overwrites a changed
@@ -268,7 +274,7 @@ public class QdrantBackend implements Backend {
                 }
             }
         } finally {
-            lock.unlock();
+            releaseDocLock(docId, docLock);
         }
 
         String message = chunkResult.message();
@@ -435,9 +441,23 @@ public class QdrantBackend implements Backend {
         }
     }
 
-    private ReentrantLock lockFor(String docId) {
-        // floorMod: hashCode can be negative, and a negative index throws.
-        return docLocks[Math.floorMod(docId.hashCode(), DOC_LOCK_STRIPES)];
+    /** Register interest in {@code docId}'s lock and take it. Pair with {@link #releaseDocLock}. */
+    private DocLock acquireDocLock(String docId) {
+        DocLock dl = docLocks.compute(docId, (k, v) -> {
+            if (v == null) {
+                v = new DocLock();
+            }
+            v.refs++;
+            return v;
+        });
+        dl.lock.lock();
+        return dl;
+    }
+
+    /** Release the lock and drop the map entry once nobody holds or waits for it. */
+    private void releaseDocLock(String docId, DocLock dl) {
+        dl.lock.unlock();
+        docLocks.computeIfPresent(docId, (k, v) -> (--v.refs == 0) ? null : v);
     }
 
     /**
