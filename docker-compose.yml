@@ -128,8 +128,13 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys,json; d=json.loads(urllib.request.urlopen('http://localhost:8090/healthz',timeout=4).read()); sys.exit(0 if d.get('ready') else 1)"]
       interval: 30s
-      timeout: 5s
-      retries: 3
+      # The embed endpoint blocks the sidecar's event loop for the whole
+      # batch (7 s+ under load), so a 5 s probe timeout flips a BUSY sidecar
+      # to "unhealthy" and compose then refuses to start dependents (seen
+      # 2026-09-17: pdf-rag-http left stopped). Probe timeout must exceed a
+      # batch. See docs/plans/sidecar-throughput-v1.md step 2 for the fix.
+      timeout: 40s
+      retries: 5
       start_period: 15m
     # For GPU acceleration, layer in docker-compose.gpu.yml — see that file
     # for the host-side prerequisites and activation commands.
