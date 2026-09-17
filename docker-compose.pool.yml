@@ -1,0 +1,30 @@
+# Sidecar POOL overlay: put an nginx least-connections balancer in front of
+# several ColPali sidecars (the local one plus replicas on other GPU hosts)
+# and point pdf-rag-http at it. Layer explicitly:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.pool.yml up -d
+# Upstreams live in deploy/colpali-lb.conf. Replicas on other hosts run the
+# same image + model cache with the same COLPALI_* env (vectors must match);
+# see docs/plans/sidecar-pool-v1.md for the big-dumb layout and the measured
+# cross-GPU-generation parity caveat.
+services:
+  colpali-lb:
+    image: nginx:1.27-alpine
+    container_name: pdf-rag-colpali-lb
+    volumes:
+      - ./deploy/colpali-lb.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      colpali-server:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  pdf-rag-http:
+    environment:
+      COLPALI_SIDECAR_URL: http://colpali-lb:8090
+    depends_on:
+      colpali-lb:
+        condition: service_healthy

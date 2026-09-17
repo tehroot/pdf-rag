@@ -1,0 +1,97 @@
+# ColPali sidecar replicas on big-dumb (2x CMP 170HX, 64 GB each).
+# Image and model cache are copied from the r530 (pdf-rag-colpali-server:latest,
+# hf-cache tar) — nothing is built or downloaded here. Same env as the r530
+# sidecar so vectors are identical. One service per GPU slot; scale by adding
+# services (replica N on GPU N%2) — each needs ~9 GB at batch 8, ~13 GB at 12.
+#
+# Bench first: `docker compose up -d colpali-b1` (GPU 1, 13.5 GB free while the
+# chat LLM is loaded). Full pool needs the LLM container stopped.
+
+x-sidecar: &sidecar
+  image: pdf-rag-colpali-server:latest
+  restart: unless-stopped
+  environment: &sidecar-env
+    COLPALI_MODEL: TomoroAI/tomoro-colqwen3-embed-4b
+    COLPALI_MODEL_REVISION: bf790bd8780b098b86453444632a184bb770be1a
+    COLPALI_DEVICE: cuda
+    COLPALI_DTYPE: bfloat16
+    COLPALI_MAX_BATCH_SIZE: ${COLPALI_MAX_BATCH_SIZE:-12}
+    COLPALI_MAX_VISUAL_TOKENS: ${COLPALI_MAX_VISUAL_TOKENS:-1280}
+    COLPALI_ATTN_IMPL: sdpa
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    HF_HUB_OFFLINE: "1"
+  volumes:
+    - /srv_big/pdf-rag-sidecar/hf-cache:/root/.cache/huggingface
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request,sys,json; d=json.loads(urllib.request.urlopen('http://localhost:8090/healthz',timeout=4).read()); sys.exit(0 if d.get('ready') else 1)"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 10m
+
+services:
+  # --- bench replica: GPU 1 (has ~13.5 GB free next to the chat LLM) ---
+  colpali-b1:
+    <<: *sidecar
+    container_name: colpali-b1
+    ports: ["8091:8090"]
+    environment:
+      <<: *sidecar-env
+      COLPALI_MAX_BATCH_SIZE: ${BENCH_BATCH:-8}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+
+  # --- pool replicas: only with the chat LLM stopped ---
+  colpali-0a:
+    <<: *sidecar
+    container_name: colpali-0a
+    ports: ["8100:8090"]
+    profiles: [pool]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+  colpali-0b:
+    <<: *sidecar
+    container_name: colpali-0b
+    ports: ["8101:8090"]
+    profiles: [pool]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+  colpali-1a:
+    <<: *sidecar
+    container_name: colpali-1a
+    ports: ["8110:8090"]
+    profiles: [pool]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+  colpali-1b:
+    <<: *sidecar
+    container_name: colpali-1b
+    ports: ["8111:8090"]
+    profiles: [pool]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
