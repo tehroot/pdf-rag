@@ -10,8 +10,13 @@ services:
   colpali-lb:
     image: nginx:1.27-alpine
     container_name: pdf-rag-colpali-lb
+    # Mount the DIRECTORY and point nginx at the file: a single-file bind
+    # mount pins the inode, and `git pull` writes a new file, so a reload
+    # would keep the old config (bit us on 2026-09-17). After a pull:
+    #   docker compose ... exec colpali-lb nginx -s reload
     volumes:
-      - ./deploy/colpali-lb.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy:/etc/nginx/deploy:ro
+    command: ["nginx", "-c", "/etc/nginx/deploy/colpali-lb.conf", "-g", "daemon off;"]
     depends_on:
       colpali-server:
         condition: service_healthy
