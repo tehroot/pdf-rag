@@ -2,7 +2,9 @@
 # Image and model cache are copied from the r530 (pdf-rag-colpali-server:latest,
 # hf-cache tar) — nothing is built or downloaded here. Same env as the r530
 # sidecar so vectors are identical. One service per GPU slot; scale by adding
-# services (replica N on GPU N%2) — each needs ~9 GB at batch 8, ~13 GB at 12.
+# services — each replica takes ~9 GB at batch 12 (measured 17.5 GB per card
+# with two). Four per card fits in 64 GB with margin; gain past two per card
+# is the CPU-gap fill only (two replicas = 1.6x one), so measure.
 #
 # Bench first: `docker compose up -d colpali-b1` (GPU 1, 13.5 GB free while the
 # chat LLM is loaded). Full pool needs the LLM container stopped.
@@ -87,6 +89,54 @@ services:
     <<: *sidecar
     container_name: colpali-1b
     ports: ["8111:8090"]
+    profiles: [pool]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+  colpali-0c:
+    <<: *sidecar
+    container_name: colpali-0c
+    ports: ["8102:8090"]
+    profiles: [pool]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+  colpali-0d:
+    <<: *sidecar
+    container_name: colpali-0d
+    ports: ["8103:8090"]
+    profiles: [pool]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+  colpali-1c:
+    <<: *sidecar
+    container_name: colpali-1c
+    ports: ["8112:8090"]
+    profiles: [pool]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+  colpali-1d:
+    <<: *sidecar
+    container_name: colpali-1d
+    ports: ["8113:8090"]
     profiles: [pool]
     deploy:
       resources:
