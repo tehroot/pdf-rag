@@ -180,6 +180,15 @@ services:
 
       # ColPali sidecar
       COLPALI_SIDECAR_URL: http://colpali-server:8090
+      # JVM sizing passthrough. The eclipse-temurin runtime image takes the
+      # JDK default heap (25% of host RAM, ergonomic: 30 GiB on a 188 GiB
+      # host). A bulk visual ingest holds, per queue worker, a ~78 MB JSON
+      # embed response, its boxed-double parse (~120 MB), and a document's
+      # accumulated page vectors (330 MB for 200 pages), so 24 workers filled
+      # that heap and embed reads failed with "IOException: Java heap space"
+      # (R530, 2026-09-17). Set e.g. PDF_RAG_JAVA_TOOL_OPTIONS=-Xmx64g in .env
+      # for a large-worker deployment. Empty = JDK defaults.
+      JAVA_TOOL_OPTIONS: ${PDF_RAG_JAVA_TOOL_OPTIONS:-}
       COLPALI_BATCH_SIZE: ${COLPALI_BATCH_SIZE:-4}
 
       # Async ingest queue — aggressively queue on CPU sidecars
