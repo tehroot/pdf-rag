@@ -168,11 +168,41 @@ public class IngestWorker {
             return true;
         } catch (Exception e) {
             String message = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            if (shuttingDown(e)) {
+                // stop() interrupted this thread mid-ingest. That is not a
+                // job defect: put it back in line so the next start picks it
+                // up. Before this, every graceful restart FAILED the jobs in
+                // flight ("Interrupted calling ColPali sidecar/Qdrant") — 65
+                // jobs lost across a day of restarts on the R530, 2026-09-17.
+                LOG.warnf("Worker shutting down; job=%s requeued (%s)", job.jobId(), message);
+                queue.requeueTransient(job.jobId());
+                return true;
+            }
             LOG.warnf("Worker failed job=%s: %s", job.jobId(), message);
             queue.markFailed(job.jobId(), message);
             releaseSnapshot(job.jobId());   // FAILED is terminal here
             return false;
         }
+    }
+
+    /**
+     * True when the failure is the worker being stopped, not the job: the
+     * thread carries the interrupt flag (clients re-set it after catching
+     * InterruptedException) or an InterruptedException sits in the cause
+     * chain. Deliberately NOT keyed on the running flag: tests drive
+     * processOne without start(), and a job that fails for its own reasons
+     * during the stop window should still be recorded as failed.
+     */
+    private boolean shuttingDown(Throwable e) {
+        if (Thread.currentThread().isInterrupted()) {
+            return true;
+        }
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof InterruptedException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void releaseSnapshot(String jobId) {

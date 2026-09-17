@@ -8,6 +8,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hayden.ingest.IngestException;
+import org.hayden.ingest.SidecarUnavailableException;
+import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.net.URI;
@@ -195,25 +197,65 @@ public class ColPaliClient {
 
     // ---- plumbing -----------------------------------------------------------
 
+    private static final Logger LOG = Logger.getLogger(ColPaliClient.class);
+
+    /** Attempts per request. Embedding is a pure function of the request, so a retry is safe. */
+    static final int SEND_ATTEMPTS = 2;
+    static final long RETRY_DELAY_MS = 2_000;
+
     private <T> T sendForJson(HttpRequest req, TypeReference<T> type) {
         HttpResponse<byte[]> resp = sendRaw(req);
-        if (resp.statusCode() / 100 != 2) {
-            throw new IngestException("ColPali sidecar " + req.method() + " " + req.uri()
-                    + " returned HTTP " + resp.statusCode() + ": "
-                    + new String(resp.body(), StandardCharsets.UTF_8));
+        int code = resp.statusCode();
+        if (code / 100 != 2) {
+            String body = new String(resp.body(), StandardCharsets.UTF_8);
+            String msg = "ColPali sidecar " + req.method() + " " + req.uri()
+                    + " returned HTTP " + code + ": " + body;
+            // 502/503/504 come from a proxy or balancer in front of the
+            // sidecar(s) (no live upstream, restart window): an environment
+            // condition, so the queue worker requeues instead of failing.
+            if (code == 502 || code == 503 || code == 504) {
+                throw new SidecarUnavailableException(msg);
+            }
+            throw new IngestException(msg);
         }
         return readJson(resp.body(), type);
     }
 
+    /**
+     * Send with one retry on I/O failure. Observed on the R530 pool
+     * (2026-09-17): about 0.5% of embed POSTs failed with an IOException
+     * while the balancer logged a 200 for every request it saw and no TCP
+     * close crossed the wire — i.e. a client-side condition. A second
+     * attempt on a fresh connection is cheap; if it also fails the job is
+     * requeued as transient rather than lost, and the exception class and
+     * message are logged so the cause can be seen.
+     */
     private HttpResponse<byte[]> sendRaw(HttpRequest req) {
-        try {
-            return http.send(req, HttpResponse.BodyHandlers.ofByteArray());
-        } catch (IOException e) {
-            throw new IngestException("I/O error calling ColPali sidecar at " + req.uri(), e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IngestException("Interrupted calling ColPali sidecar at " + req.uri(), e);
+        IOException last = null;
+        for (int attempt = 1; attempt <= SEND_ATTEMPTS; attempt++) {
+            try {
+                return http.send(req, HttpResponse.BodyHandlers.ofByteArray());
+            } catch (IOException e) {
+                last = e;
+                LOG.warnf("ColPali sidecar %s %s attempt %d/%d failed: %s: %s",
+                        req.method(), req.uri(), attempt, SEND_ATTEMPTS,
+                        e.getClass().getName(), e.getMessage());
+                if (attempt < SEND_ATTEMPTS) {
+                    try {
+                        Thread.sleep(RETRY_DELAY_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IngestException("Interrupted calling ColPali sidecar at " + req.uri(), ie);
+                    }
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IngestException("Interrupted calling ColPali sidecar at " + req.uri(), e);
+            }
         }
+        throw new SidecarUnavailableException("I/O error calling ColPali sidecar at " + req.uri()
+                + " after " + SEND_ATTEMPTS + " attempts: "
+                + last.getClass().getSimpleName() + ": " + last.getMessage());
     }
 
     private <T> T readJson(byte[] body, TypeReference<T> type) {
