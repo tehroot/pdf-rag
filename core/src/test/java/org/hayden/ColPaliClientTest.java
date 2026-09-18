@@ -129,6 +129,57 @@ class ColPaliClientTest {
     }
 
     @Test
+    void embedPages_requestsBinaryEncoding_andDecodesFloat32Base64() {
+        // little-endian float32 rows [0.1,0.2],[0.3,0.4] and pooled [1,2]
+        java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(16).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        for (float f : new float[]{0.1f, 0.2f, 0.3f, 0.4f}) buf.putFloat(f);
+        String original = java.util.Base64.getEncoder().encodeToString(buf.array());
+        java.nio.ByteBuffer pb = java.nio.ByteBuffer.allocate(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        pb.putFloat(1f).putFloat(2f);
+        String pooled = java.util.Base64.getEncoder().encodeToString(pb.array());
+        server.stubFor(post(urlEqualTo("/embed_pages"))
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"embeddings":[{"page_id":"p:1","dim":2,"encoding":"f32b64",
+                          "original":"%s","pooled_rows":"%s","pooled_cols":""}]}
+                        """.formatted(original, pooled))));
+
+        List<ColPaliClient.PageEmbedding> out = client.embedPages(List.of(
+                new ColPaliClient.PageInput("p:1", new byte[]{1, 2, 3})));
+
+        ColPaliClient.PageEmbedding pe = out.get(0);
+        assertThat(pe.original()).hasNumberOfRows(2);
+        assertThat(pe.original()[0]).containsExactly(0.1f, 0.2f);
+        assertThat(pe.original()[1]).containsExactly(0.3f, 0.4f);
+        assertThat(pe.pooledRows()).hasNumberOfRows(1);
+        assertThat(pe.pooledRows()[0]).containsExactly(1f, 2f);
+        assertThat(pe.pooledCols()).isEmpty();
+
+        String body = server.getAllServeEvents().get(0).getRequest().getBodyAsString();
+        assertThat(body).contains("\"encoding\":\"f32b64\"");
+    }
+
+    @Test
+    void decodeVectors_float16Base64() {
+        java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(6).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        for (float f : new float[]{0.5f, -1.25f, 0.001f}) buf.putShort(Float.floatToFloat16(f));
+        String b64 = java.util.Base64.getEncoder().encodeToString(buf.array());
+        com.fasterxml.jackson.databind.JsonNode node = new com.fasterxml.jackson.databind.ObjectMapper().getNodeFactory().textNode(b64);
+        float[][] out = ColPaliClient.decodeVectors(node, 3, "f16b64");
+        assertThat(out).hasNumberOfRows(1);
+        assertThat(out[0][0]).isEqualTo(0.5f);
+        assertThat(out[0][1]).isEqualTo(-1.25f);
+        assertThat(out[0][2]).isCloseTo(0.001f, org.assertj.core.data.Offset.offset(1e-6f));
+    }
+
+    @Test
+    void decodeVectors_rejectsMisalignedBytes() {
+        String b64 = java.util.Base64.getEncoder().encodeToString(new byte[]{1, 2, 3, 4, 5});
+        com.fasterxml.jackson.databind.JsonNode node = new com.fasterxml.jackson.databind.ObjectMapper().getNodeFactory().textNode(b64);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> ColPaliClient.decodeVectors(node, 2, "f32b64"))
+                .isInstanceOf(org.hayden.ingest.IngestException.class);
+    }
+
+    @Test
     void embedPages_splitsByBatchSize() {
         // batchSize=4 (newClient param); ask for 9 pages → expect 3 batched POSTs (4 + 4 + 1).
         // Each stub returns N embeddings to match its batch.
@@ -240,6 +291,7 @@ class ColPaliClientTest {
         ColPaliClient c = new ColPaliClient();
         setField(c, "baseUrl", baseUrl);
         setField(c, "connectTimeoutSeconds", 5L);
+        setField(c, "wireEncoding", "f32b64");
         setField(c, "requestTimeoutSeconds", 10L);
         setField(c, "batchSize", batchSize);
         setField(c, "objectMapper", new ObjectMapper());

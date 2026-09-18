@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Response
 from .config import Settings, settings
 from .model import ModelHandle
 from .schemas import (
+    ENCODINGS,
     EmbedPagesRequest,
     EmbedPagesResponse,
     EmbedQueryRequest,
@@ -100,6 +101,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
                 pooled_methods=["rows", "cols"] if cfg.enable_pooled else [],
                 max_batch_size=cfg.max_batch_size,
                 device=handle.device,
+                encodings=list(ENCODINGS),
             )
         # Pre-load fallback: report configured values; vector_dim is a guess.
         return InfoResponse(

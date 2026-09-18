@@ -83,9 +83,25 @@ def embed_pages_arrays(
     return out
 
 
+def _encode_array(arr: np.ndarray, encoding: str) -> str:
+    """Row-major little-endian bytes, base64; "" for an empty array."""
+    if arr.size == 0:
+        return ""
+    dtype = "<f2" if encoding == "f16b64" else "<f4"
+    return base64.b64encode(np.ascontiguousarray(arr, dtype=dtype).tobytes()).decode("ascii")
+
+
 def embed_pages_bytes(handle: ModelHandle, req: EmbedPagesRequest, cfg: Settings) -> bytes:
     """The /embed_pages response body: same JSON shape as ``EmbedPagesResponse``,
     serialized straight from the numpy arrays with orjson.
+
+    With ``req.encoding`` other than ``json`` the three arrays are base64
+    strings of raw little-endian floats and the page carries ``dim`` (see
+    ``EmbedPagesRequest``). For 12 pages x 1,280 x 320 that is 27 MB
+    (float32) or 13 MB (float16) on the wire instead of 62 MB of JSON
+    numbers, and the client decodes it in one pass instead of parsing
+    4.9 million numbers into boxed objects — the ingest JVM's heap ceiling
+    on the R530 (2026-09-17).
 
     Why not the pydantic model: for 12 pages x 1,280 tokens x 320 dims,
     ``tolist()`` + model validation + ``dump_json`` cost ~2.3 s per batch on
@@ -94,8 +110,18 @@ def embed_pages_bytes(handle: ModelHandle, req: EmbedPagesRequest, cfg: Settings
     prints each float32 in its shortest form, which is the same float32 once
     the Java client casts ``double -> float``, and about half the bytes.
     """
-    return orjson.dumps({"embeddings": embed_pages_arrays(handle, req, cfg)},
-                        option=orjson.OPT_SERIALIZE_NUMPY)
+    pages = embed_pages_arrays(handle, req, cfg)
+    if req.encoding != "json":
+        for p in pages:
+            dim = 0
+            for key in ("original", "pooled_rows", "pooled_cols"):
+                if p[key].size:
+                    dim = int(p[key].shape[1])
+            for key in ("original", "pooled_rows", "pooled_cols"):
+                p[key] = _encode_array(p[key], req.encoding)
+            p["dim"] = dim
+            p["encoding"] = req.encoding
+    return orjson.dumps({"embeddings": pages}, option=orjson.OPT_SERIALIZE_NUMPY)
 
 
 def embed_pages_inference(
