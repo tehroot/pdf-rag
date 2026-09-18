@@ -1,7 +1,9 @@
 # Plan: ColPali sidecar throughput (v1)
 
-Status: step 1 DONE (2026-09-17, commit 2ab91e8, rolled out to all nine
-replicas); steps 2-4 not started. See "Step 1 outcome" at the end.
+Status: steps 1 and 4 DONE (2026-09-17/18, commits 2ab91e8 and 7e2c015,
+rolled out to all nine replicas and the ingest service); steps 2 and 3 not
+started. See the outcome sections at the end. After step 4 the limiter
+moved to Qdrant ingestion (see "Step 4 outcome").
 Author drafted: 2026-09-17
 
 ## Context
@@ -200,3 +202,38 @@ critical path on an idle card; on a shared card the GPU wait dominates
 the remainder. Rollout: rolling `--force-recreate` per replica, ~10 s each,
 no job loss (balancer 502 during a swap is transient for the client since
 9851501).
+
+## Step 4 outcome (2026-09-18)
+
+Implemented as `EmbedPagesRequest.encoding` = `json` (default) | `f32b64`
+| `f16b64`; base64 of row-major little-endian floats per array plus `dim`,
+`/info` lists `encodings`. The Java client requests
+`ingest.colpali.wire-encoding` (default `f32b64`) and decodes a JSON array
+or a base64 string per field, so either side can be old. 67 sidecar tests
+and the touched Java classes pass; the rolling deploy lost no job.
+
+| | before (json, after step 1) | after (f32b64) |
+|---|---|---|
+| bytes per 12-page batch through the balancer | 61.8 MB | 26.9 MB |
+| embed requests served per 8 min | 414 | 489 |
+| ingest JVM heap-space retries | rare | 0 |
+
+The page rate did not follow (463/min over 18 min vs 641 in the best
+step-1 window) because the bottleneck moved: worker thread samples showed
+most workers waiting on the Qdrant upsert, Qdrant at 470-550% CPU, per-page
+upsert 0.32 s (afternoon) -> 0.54 s, collection "yellow" with 460+
+segments, and the pool writing 230-255 MB/s. The pooled vectors carried the
+default HNSW (m=16) and were being graph-indexed as segments grew.
+
+Bulk-load measure applied (2026-09-18 00:39, reversible, no restart):
+`PATCH /collections/dtic_archive_pages {"optimizers_config":{"indexing_threshold":100000000}}`
+— no HNSW building during the load. Within 7 min: collection green, upsert
+0.44 s/page, Qdrant 351% CPU, 582 pages/min, both big-dumb cards busy.
+**At the end of the load set it back**
+(`{"optimizers_config":{"indexing_threshold":20000}}`) so Qdrant builds the
+pooled-vector graphs once; until then pooled-vector prefetch on unindexed
+segments is brute force (correct, slower queries).
+
+Next Qdrant-side levers, in order: gRPC upserts (binary, no 1.6 MB JSON per
+page to parse), then storage — the pool is spinning mirrors and writes at
+its sequential ceiling during the load.
