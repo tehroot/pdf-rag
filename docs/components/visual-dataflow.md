@@ -36,8 +36,8 @@ R530 ─────────────────────────
                                           │                              colpali-server)
    5. decode base64 float32 ◄── 27 MB ◄───┘ ◄──── 4. model + pooling ◄──┘
       → float[][] per page
-   6. Qdrant upsert, 4 pages per call ──► qdrant:6333 (REST, JSON, wait=true)
-                                              7. parse, append segment, persist (pool)
+   6. Qdrant upsert, 4 pages per call ──► qdrant:6334 (gRPC, packed float32, wait=true)
+                                              7. append segment, persist (pool)
 ```
 
 1. **Render.** A queue worker picks a `VISUAL` job and rasterizes every
