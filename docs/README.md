@@ -21,9 +21,9 @@ search them. Two backends, picked per-call or by environment default:
                       │  ┌───────────────────────────────────────┐  ┌──────────────────┐  │
                       │  │ QdrantBackend                         │  │ OpenWebUiBackend │  │
                       │  │  text:   fetch → Tika → chunk →       │  │ fetch → upload → │  │
-                      │  │          embed → upsert <kb>     (REST)  │ poll → /file/add │  │
+                      │  │          embed → upsert <kb>    (REST) │  │ poll → /file/add │  │
                       │  │  visual: render → embed pages →       │  └────────┬─────────┘  │
-                      │  │          upsert <kb>_pages       (gRPC)           │            │
+                      │  │          upsert <kb>_pages      (gRPC) │           │            │
                       │  └────┬────────────┬──────────────┬──────┘           │            │
                       │       │            │              │                  │            │
                       └───────┼────────────┼──────────────┼──────────────────┼────────────┘
