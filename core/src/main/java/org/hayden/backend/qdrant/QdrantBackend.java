@@ -8,20 +8,31 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hayden.backend.Backend;
 import org.hayden.backend.KnowledgeBaseSummary;
 import org.hayden.backend.qdrant.fusion.FusionEngine;
+import org.hayden.ingest.DeleteResult;
+import org.hayden.ingest.KbDeleteResult;
 import org.hayden.ingest.FetchedFile;
 import org.hayden.ingest.FileFetcher;
 import org.hayden.ingest.IngestException;
 import org.hayden.ingest.IngestRequest;
 import org.hayden.ingest.IngestResult;
+import org.hayden.ingest.JobSourceSnapshots;
 import org.hayden.ingest.SearchRequest;
 import org.hayden.ingest.SearchResponse;
+import org.hayden.ingest.NoTextLayerException;
+import org.hayden.ingest.SidecarUnavailableException;
 import org.hayden.jobs.IngestJob;
 import org.hayden.jobs.IngestQueue;
+import org.hayden.jobs.JobKind;
+import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Orchestrator for the Qdrant backend. Delegates text-side work to
@@ -29,16 +40,21 @@ import java.util.UUID;
  * delegates the page-side work to {@link ColPaliPipeline}. Both pipelines
  * share a doc id so chunks and pages join cleanly at fusion time.
  *
- * <p>Sync vs queued routing: ingest calls for large PDFs (page count above
- * {@code ingest.queue.sync_threshold_pages}, default 20) get queued for
- * background processing. The {@link org.hayden.jobs.IngestWorker} picks
- * them up and calls back into {@link #ingestForWorker(IngestJob)}. Smaller
- * files run synchronously so the agent gets results immediately.
+ * <p>Sync vs queued routing: the text side always runs synchronously (the
+ * caller gets a chunk count and the doc is text-searchable immediately). For
+ * large visual PDFs (page count at or above
+ * {@code ingest.queue.sync_threshold_pages}, default 20) only the GPU-bound
+ * visual side is queued, as a {@link JobKind#VISUAL} job; the
+ * {@link org.hayden.jobs.IngestWorker} picks it up and calls back into
+ * {@link #ingestForWorker(IngestJob)}. Chunks and pages need no ingest-time
+ * link — they join at search time via the shared docId.
  */
 @ApplicationScoped
 public class QdrantBackend implements Backend {
 
     public static final String NAME = "qdrant";
+
+    private static final Logger LOG = Logger.getLogger(QdrantBackend.class);
 
     @Inject
     FileFetcher fetcher;
@@ -55,6 +71,45 @@ public class QdrantBackend implements Backend {
     @Inject
     IngestQueue queue;
 
+    @Inject
+    JobSourceSnapshots snapshots;
+
+    /**
+     * Serializes writers on one doc id. Deterministic ids mean an upload batch
+     * and a directory scan (or two uploads of one filename) can target the
+     * same doc id at once; doIngest does deleteDoc-then-write, and two of
+     * those interleaved leave one writer's points deleted by the other. The
+     * lock is held across a document's whole delete + write critical section
+     * by every entry point (sync ingest, split-queue submit, worker).
+     *
+     * <p>One lock per doc id, reference-counted, NOT a fixed stripe array.
+     * The earlier 64-stripe design assumed collisions were harmless because
+     * ingest was I/O-bound. That stopped being true once the visual lane
+     * held its stripe across render + VLM embed: a 400-page job holds a
+     * stripe for minutes, and any text ingest whose id hashes to that stripe
+     * waits the whole time (observed on the R530 with the DTIC corpus,
+     * 2026-09-17: one file in a 40-file directory batch waited 16 min behind
+     * an unrelated visual job; with 5 workers on 64 stripes about one file
+     * in twelve collided). Unrelated documents must never serialize.
+     *
+     * <p>The map is bounded by the number of doc ids with a holder or waiter
+     * RIGHT NOW, not by corpus size: {@link #acquireDocLock} bumps a per-id
+     * reference count under {@code ConcurrentHashMap.compute} (atomic per
+     * key), and {@link #releaseDocLock} decrements it and drops the entry at
+     * zero under {@code computeIfPresent}. A new arrival between the last
+     * holder's unlock and the removal still finds the same entry (its
+     * compute runs before or after the removal, never interleaved), so two
+     * callers on one id always share one lock. Single-process is the
+     * deployment, so no distributed lock.
+     */
+    private final ConcurrentHashMap<String, DocLock> docLocks = new ConcurrentHashMap<>();
+
+    /** A lock plus the number of threads that currently hold or wait for it. */
+    private static final class DocLock {
+        final ReentrantLock lock = new ReentrantLock();
+        int refs;   // guarded by the map's per-key compute atomicity
+    }
+
     @ConfigProperty(name = "ingest.visual_index.default_enabled", defaultValue = "true")
     boolean defaultVisualIndexEnabled;
 
@@ -68,8 +123,17 @@ public class QdrantBackend implements Backend {
 
     @Override
     public IngestResult ingest(IngestRequest req) {
+        return ingest(req, null);
+    }
+
+    @Override
+    public IngestResult ingest(IngestRequest req, String explicitDocId) {
         FetchedFile file = fetch(req);
-        String docId = UUID.randomUUID().toString();
+        // Caller-supplied id (directory scans use a deterministic one keyed on
+        // the source path, for idempotent re-ingest); otherwise a fresh random.
+        String docId = (explicitDocId == null || explicitDocId.isBlank())
+                ? UUID.randomUUID().toString()
+                : explicitDocId;
 
         boolean visualRequested = resolveVisualIndexEnabled(req);
         validateModeConsistency(req.kbName(), visualRequested);
@@ -84,54 +148,162 @@ public class QdrantBackend implements Backend {
                             + "enable_visual_index=false to skip the visual side.");
         }
 
-        // Async routing: big PDFs that will take minutes to embed go to the queue
-        // so the agent isn't blocked. Everything else runs synchronously.
+        // Async routing: big PDFs whose VLM embedding will take minutes get
+        // their visual side queued. The text side still runs synchronously —
+        // it's seconds of work, the caller gets a real chunk count, and the
+        // doc is text-searchable immediately. The queue is thereby a pure
+        // VLM lane: back-to-back GPU work, no Tika/bge gaps between jobs.
         if (shouldQueue(file, visualRequested)) {
-            IngestJob job = IngestJob.queued(req, docId);
+            // Create <kb>_pages BEFORE anything lands: its existence is the
+            // KB's visual-capability flag, and mode validation on the next
+            // ingest into this KB would otherwise reject "chunks exist but
+            // no visual index" while the job drains.
+            pages.ensureCollectionFor(req.kbName());
+
+            IngestResult chunkResult;
+            DocLock docLock = acquireDocLock(docId);
+            try {
+                chunks.deleteDoc(req.kbName(), docId);
+                chunkResult = ingestChunksOrNoText(req, file, docId, visualRequested);
+            } finally {
+                releaseDocLock(docId, docLock);
+            }
+
+            // Pin the bytes the queued job will read: the persisted request
+            // points at a hardlink snapshot, so an on_conflict=replace upload
+            // over the original path can't change what the worker renders.
+            // INLINE requests carry their bytes; URL re-fetches are out of
+            // scope (nothing local to pin).
+            IngestJob job = IngestJob.queuedVisual(req, docId);
+            job = job.withRequest(snapshotRequest(req, job.jobId()));
             queue.submit(job);
-            return IngestResult.queued(NAME, req.kbName(), docId, job.jobId());
+            return IngestResult.queuedVisual(NAME, req.kbName(), docId,
+                    job.jobId(), chunkResult.chunkCount());
         }
 
         return doIngest(req, file, docId, visualRequested);
     }
 
     /**
-     * Worker entry point: re-fetch the file from the persisted request,
-     * re-validate mode consistency (the KB's state may have changed between
-     * submit and worker pickup), and run the actual ingest. Used by
-     * {@link org.hayden.jobs.IngestWorker}.
+     * Worker entry point: re-fetch the file from the persisted request and run
+     * the job's work. VISUAL jobs (the normal case since the split — text ran
+     * at submit) run only the page pipeline; legacy FULL jobs (persisted
+     * before an upgrade) re-validate mode consistency and run both pipelines
+     * as before. Used by {@link org.hayden.jobs.IngestWorker}.
      */
     public IngestResult ingestForWorker(IngestJob job) {
         IngestRequest req = job.request();
         FetchedFile file = fetch(req);
+        if (job.effectiveKind() == JobKind.VISUAL) {
+            return doVisualIngest(req, file, job.docId());
+        }
         boolean visualRequested = resolveVisualIndexEnabled(req);
         validateModeConsistency(req.kbName(), visualRequested);
         if (visualRequested && !pages.sidecarHealthy()) {
-            throw new IngestException(
+            throw new SidecarUnavailableException(
                     "Visual index requested for KB '" + req.kbName()
                             + "' but the ColPali sidecar is unreachable.");
         }
         return doIngest(req, file, job.docId(), visualRequested);
     }
 
+    /**
+     * Visual side only — the text side already ran synchronously at submit.
+     * Mode consistency was validated at submit too, and <kb>_pages was created
+     * eagerly there, so no re-validation: this KB being visual is a given.
+     */
+    private IngestResult doVisualIngest(IngestRequest req, FetchedFile file, String docId) {
+        if (!pages.sidecarHealthy()) {
+            throw new SidecarUnavailableException(
+                    "Visual job for KB '" + req.kbName()
+                            + "' but the ColPali sidecar is unreachable.");
+        }
+        ColPaliPipeline.PagesIngestResult pagesResult;
+        DocLock docLock = acquireDocLock(docId);
+        try {
+            // Replace semantics for retries: discard a previous partial attempt.
+            pages.deleteDoc(req.kbName(), docId);
+            pagesResult = pages.ingestPages(req, file, docId);
+        } finally {
+            releaseDocLock(docId, docLock);
+        }
+        return new IngestResult(
+                NAME,
+                req.kbName(),
+                req.kbName(),
+                docId,
+                "completed",
+                0,
+                pagesResult.pageCount(),
+                true,
+                pagesResult.pageCount() + " pages visual-indexed "
+                        + "(text chunks were ingested at submit time)",
+                List.of(),
+                null);
+    }
+
+    /**
+     * Run the chunk side. A document with no extractable text (scanned PDF,
+     * no text layer) is a hard failure for a text-only ingest, but with a
+     * visual index requested it is the case the page embeddings exist for:
+     * skip the chunks and let the visual side run. Before this, a directory
+     * ingest of a bulk scanned corpus rejected every such file outright
+     * (524 of ~12k DTIC reports skipped on the R530, 2026-09-17).
+     */
+    private IngestResult ingestChunksOrNoText(IngestRequest req, FetchedFile file,
+                                              String docId, boolean visualRequested) {
+        try {
+            return chunks.ingestChunks(req, file, docId);
+        } catch (NoTextLayerException e) {
+            if (!visualRequested || !isPdf(file)) {
+                throw e;
+            }
+            LOG.infof("No text layer in %s (doc=%s); 0 chunks, visual side only", file.filename(), docId);
+            return new IngestResult(NAME, req.kbName(), req.kbName(), docId, "completed",
+                    0, 0, true,
+                    "No text layer (" + e.getMessage() + "); 0 chunks ingested, visual side only",
+                    List.of(), null);
+        }
+    }
+
     /** The actual ingest work. Shared by sync path and worker path. */
     IngestResult doIngest(IngestRequest req, FetchedFile file, String docId,
                           boolean visualRequested) {
-        // Text ingest always runs.
-        IngestResult chunkResult = chunks.ingestChunks(req, file, docId);
-
+        IngestResult chunkResult;
         List<String> warnings = new ArrayList<>();
         int pageCount = 0;
-        if (visualRequested) {
-            if (isPdf(file)) {
-                ColPaliPipeline.PagesIngestResult pagesResult =
-                        pages.ingestPages(req, file, docId);
-                pageCount = pagesResult.pageCount();
-            } else {
-                warnings.add("enable_visual_index=true but file is not a PDF; "
-                        + "visual side skipped for this document. "
-                        + "Text chunks still ingested.");
+        // The whole delete + write is one critical section per doc id: a
+        // concurrent writer on the same deterministic id (upload + directory
+        // scan over one tree) must not delete points this call just wrote.
+        DocLock docLock = acquireDocLock(docId);
+        try {
+            // Replace semantics: clear any prior copy of this docId before writing.
+            // For directory re-scans (deterministic ids) this overwrites a changed
+            // file cleanly instead of leaving a stale tail of orphaned chunks; for
+            // worker retries it discards a previous partial attempt. A random docId
+            // (MCP ingest_document) matches nothing, so this is a cheap no-op there.
+            chunks.deleteDoc(req.kbName(), docId);
+            if (visualRequested) {
+                pages.deleteDoc(req.kbName(), docId);
             }
+
+            // Text ingest always runs — except that a PDF with no text layer
+            // contributes zero chunks and proceeds to the visual side.
+            chunkResult = ingestChunksOrNoText(req, file, docId, visualRequested);
+
+            if (visualRequested) {
+                if (isPdf(file)) {
+                    ColPaliPipeline.PagesIngestResult pagesResult =
+                            pages.ingestPages(req, file, docId);
+                    pageCount = pagesResult.pageCount();
+                } else {
+                    warnings.add("enable_visual_index=true but file is not a PDF; "
+                            + "visual side skipped for this document. "
+                            + "Text chunks still ingested.");
+                }
+            }
+        } finally {
+            releaseDocLock(docId, docLock);
         }
 
         String message = chunkResult.message();
@@ -156,6 +328,66 @@ public class QdrantBackend implements Backend {
     @Override
     public SearchResponse search(SearchRequest req) {
         return fusion.search(req, NAME);
+    }
+
+    @Override
+    public DeleteResult deleteDocument(String kbName, String docId) {
+        if (kbName == null || kbName.isBlank()) {
+            throw new IngestException("kb_name is required");
+        }
+        if (docId == null || docId.isBlank()) {
+            throw new IngestException("doc_id is required");
+        }
+        boolean textDeleted = chunks.deleteDoc(kbName, docId);
+        ColPaliPipeline.DeleteDocResult visual = pages.deleteDoc(kbName, docId);
+        String message;
+        if (!textDeleted && !visual.pointsDeleted()) {
+            message = "No collection found for KB '" + kbName + "'; nothing deleted.";
+        } else {
+            message = "Deleted document " + docId + " from KB '" + kbName + "'"
+                    + (visual.pointsDeleted()
+                            ? " (" + visual.imagesRemoved() + " page image(s) removed)" : "")
+                    + ".";
+        }
+        return new DeleteResult(NAME, kbName, docId, textDeleted,
+                visual.pointsDeleted(), visual.imagesRemoved(), message);
+    }
+
+    /**
+     * Full KB teardown: cancel pending queue work first (a queued visual job
+     * draining afterwards would resurrect a stub {@code <kb>_pages}), then
+     * drop the chunk collection, the pages collection, and the stored page
+     * images. Idempotent — deleting an absent KB reports nothing dropped.
+     * Caveat: a job already IN_PROGRESS can't be stopped and may recreate a
+     * stub pages collection when it completes; delete again if that matters.
+     */
+    @Override
+    public KbDeleteResult deleteKnowledgeBase(String kbName) {
+        if (kbName == null || kbName.isBlank()) {
+            throw new IngestException("kb_name is required");
+        }
+        int jobsCancelled = queue.cancelPending(kbName);
+        boolean textDropped = chunks.dropCollection(kbName);
+        ColPaliPipeline.DropResult visual = pages.dropVisualIndex(kbName);
+        String message;
+        if (!textDropped && !visual.collectionDropped()) {
+            message = "No collections found for KB '" + kbName + "'; nothing deleted"
+                    + (jobsCancelled > 0 ? " (" + jobsCancelled + " queued job(s) cancelled)" : "")
+                    + ".";
+        } else {
+            message = "Deleted KB '" + kbName + "': "
+                    + (textDropped ? "chunk collection" : "no chunk collection")
+                    + ", " + (visual.collectionDropped() ? "pages collection" : "no pages collection")
+                    + ", " + visual.filesRemoved() + " page image(s), "
+                    + jobsCancelled + " queued job(s) cancelled.";
+        }
+        return new KbDeleteResult(NAME, kbName, textDropped,
+                visual.collectionDropped(), visual.filesRemoved(), jobsCancelled, message);
+    }
+
+    @Override
+    public Long documentCount(String kbName) {
+        return chunks.countDocuments(kbName);
     }
 
     @Override
@@ -236,6 +468,48 @@ public class QdrantBackend implements Backend {
         } catch (IOException e) {
             return 0;   // unknown; treat as small.
         }
+    }
+
+    /** Register interest in {@code docId}'s lock and take it. Pair with {@link #releaseDocLock}. */
+    private DocLock acquireDocLock(String docId) {
+        DocLock dl = docLocks.compute(docId, (k, v) -> {
+            if (v == null) {
+                v = new DocLock();
+            }
+            v.refs++;
+            return v;
+        });
+        dl.lock.lock();
+        return dl;
+    }
+
+    /** Release the lock and drop the map entry once nobody holds or waits for it. */
+    private void releaseDocLock(String docId, DocLock dl) {
+        dl.lock.unlock();
+        docLocks.computeIfPresent(docId, (k, v) -> (--v.refs == 0) ? null : v);
+    }
+
+    /**
+     * For a PATH source, repoint the request at a hardlink snapshot of its
+     * file (keyed on the job id) so later overwrites of the original path
+     * can't change the bytes the worker reads. Falls through to the original
+     * request when linking fails (cross-device, no hardlinks) — the upload
+     * path then refuses replace-overwrites of that path instead.
+     */
+    private IngestRequest snapshotRequest(IngestRequest req, String jobId) {
+        if (req.sourceType() != IngestRequest.SourceType.PATH || snapshots == null) {
+            return req;
+        }
+        Optional<Path> link = snapshots.link(jobId, Path.of(req.sourceValue()));
+        if (link.isEmpty()) {
+            return req;
+        }
+        // Keep the original filename: the link's name matches, but an explicit
+        // override (if any) must survive for payload/reporting purposes.
+        return new IngestRequest(IngestRequest.SourceType.PATH,
+                link.get().toString(), req.filename(), req.kbName(),
+                req.kbDescription(), req.pollTimeoutSeconds(), req.backend(),
+                req.metadata(), req.enableVisualIndex());
     }
 
     private FetchedFile fetch(IngestRequest req) {

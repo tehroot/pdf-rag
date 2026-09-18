@@ -16,8 +16,8 @@ Each module is a Quarkus application that:
    for CDI bean discovery (the Jandex incantation).
 4. Has *zero* Java source files of its own.
 
-Run as a fat jar (`target/quarkus-app/quarkus-run.jar`), they become standalone
-MCP servers — the agent connects and gets the four tools.
+Run as a fat jar (`target/quarkus-app/quarkus-run.jar`), each becomes a
+standalone MCP server — the agent connects and gets the tools.
 
 ## server-stdio
 
@@ -48,8 +48,7 @@ server-stdio/
 </dependencies>
 ```
 
-That's the entire dependency set. The Quarkus plugin handles building the
-fast-jar layout.
+The entire dependency set; the Quarkus plugin builds the fast-jar layout.
 
 ### application.properties
 
@@ -76,11 +75,10 @@ Three things to notice:
 1. **`quarkus.index-dependency.core.*`** — `core` is a regular JAR dependency,
    and Quarkus' Arc (CDI) only scans the application module by default. This
    tells Arc to also scan `core`'s `META-INF/jandex.idx`.
-2. **`quarkus.banner.enabled=false`** — Quarkus prints a multi-line banner at
-   startup by default. To stdout. Which would corrupt the JSON-RPC frame
-   stream. Off.
+2. **`quarkus.banner.enabled=false`** — Quarkus prints a multi-line startup
+   banner to stdout by default, which would corrupt the JSON-RPC frame stream.
 3. **`quarkus.log.console.stderr=true`** — Routes Quarkus' JBoss Log Manager
-   to stderr. JSON-RPC framing on stdout, logs on stderr, total separation.
+   to stderr. JSON-RPC framing on stdout, logs on stderr.
 
 ### How it runs
 
@@ -229,9 +227,9 @@ CDI. The only reason to touch a transport module is transport-level config
 
 ## Tests
 
-No tests in the transport modules. They contain no Java code — only
-configuration. Verification is implicit: if the multi-module build succeeds
-and `target/quarkus-app/quarkus-run.jar` exists, the wiring is correct.
+None — the modules contain no Java code, only configuration. Verification is
+implicit: if the multi-module build succeeds and
+`target/quarkus-app/quarkus-run.jar` exists, the wiring is correct.
 
 Smoke testing instructions are in [../deployment.md](../deployment.md) and
 [../mcp-integration.md](../mcp-integration.md).

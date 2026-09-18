@@ -1,24 +1,49 @@
-# GPU override for the ColPali sidecar.
+# GPU override for the ColPali sidecar — makes GPU the real default.
 #
-# Activates an NVIDIA GPU reservation on the colpali-server service. The
-# matching env vars (COLPALI_DOCKERFILE=Dockerfile.cuda, COLPALI_DEVICE=cuda,
-# COLPALI_DTYPE=bfloat16, optionally COLPALI_MODEL=vidore/colqwen2-v1.0) come
-# from .env — this file only contains the GPU reservation, which compose
-# can't express conditionally inside the main file.
+# This file is symlinked as docker-compose.override.yml (committed), which
+# Docker Compose auto-loads. So on a host with an NVIDIA GPU, a plain
+#   docker compose up -d
+# builds and runs the CUDA sidecar end to end — no .env editing required.
+#
+# It flips ALL of colpali-server's defaults to GPU values (CUDA Dockerfile,
+# device, dtype, model) AND adds the NVIDIA device reservation that compose
+# can't express conditionally in the base file. Every value uses
+# ${VAR:-gpu-default}, so an explicit shell/.env value still wins — pinning
+# COLPALI_MODEL or COLPALI_DTYPE in .env is respected; this only changes the
+# fallbacks from the base file's CPU defaults to GPU ones. (compose deep-merges
+# `build`, so base `build.context: ./sidecar` is preserved and only the
+# dockerfile is replaced.)
 #
 # Prerequisites on the host:
 #   1. NVIDIA driver visible to the OS (verify with `nvidia-smi`).
 #   2. nvidia-container-toolkit installed and the docker runtime configured
 #      (verify with `docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi`).
 #
-# Bring up the stack with this override active:
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-#
-# Or symlink so plain `docker compose up -d` picks it up automatically:
-#   ln -s docker-compose.gpu.yml docker-compose.override.yml
+# CPU hosts: a plain `docker compose up` would try to reserve an nvidia device
+# and fail. Use the scripts (`scripts/up.sh` is immune — it passes explicit
+# `-f` flags, so compose skips this override), or run compose with an explicit
+# base file to bypass the override:
+#   docker compose -f docker-compose.yml up -d              # CPU, ignores this override
+#   scripts/up.sh                                           # CPU
+#   scripts/up.sh --gpu                                     # GPU (layers this file)
 
 services:
   colpali-server:
+    build:
+      dockerfile: ${COLPALI_DOCKERFILE:-Dockerfile.cuda}
+    environment:
+      COLPALI_MODEL: ${COLPALI_MODEL:-vidore/colqwen2-v1.0}
+      COLPALI_DEVICE: ${COLPALI_DEVICE:-cuda}
+      COLPALI_DTYPE: ${COLPALI_DTYPE:-bfloat16}
+      # 16 assumes a >=16 GB card (~5 GB bf16 ColQwen2 + ~0.25 GB/page
+      # activations). Must be >= the client's COLPALI_BATCH_SIZE below —
+      # the sidecar 400-rejects requests over this cap.
+      COLPALI_MAX_BATCH_SIZE: ${COLPALI_MAX_BATCH_SIZE:-16}
+      # PyTorch's caching allocator otherwise grows to the whole card and
+      # starves llama-server below (observed: 20,062 of 20,470 MiB on an
+      # A4500 at batch 16). expandable_segments lets it hand segments back.
+      # See docs/plans/gpu-text-embedder-v1.md.
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     deploy:
       resources:
         reservations:
@@ -26,3 +51,40 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  llama-server:
+    # Text embedder on the GPU. bge-small is 67 MB in f16; with the CUDA
+    # context and 4 slots of KV it needs ~0.5 GB. On the CPU it burned 20
+    # cores at 2000% and capped text ingest at ~4 docs/min (R530, 2026-09-17).
+    # `command` is a scalar, so compose replaces it: repeat the base flags.
+    # The sidecar must leave headroom — see PYTORCH_CUDA_ALLOC_CONF above and
+    # COLPALI_MAX_BATCH_SIZE in .env. docs/plans/gpu-text-embedder-v1.md.
+    image: ${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    command: >
+      -m /models/${LLAMA_MODEL_FILE:-bge-small-en-v1.5-f16.gguf}
+      --embeddings
+      --host 0.0.0.0
+      --port 8081
+      --ctx-size ${LLAMA_CTX_SIZE:-8192}
+      --parallel ${LLAMA_PARALLEL:-4}
+      --cont-batching
+      --n-gpu-layers ${LLAMA_GPU_LAYERS:-99}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  pdf-rag-http:
+    environment:
+      # GPU-host tuning (same ${VAR:-default} pattern — .env still wins).
+      # Two queue workers overlap one job's CPU rasterizing with another's GPU
+      # embedding; the client batch matches the CUDA sidecar's
+      # COLPALI_MAX_BATCH_SIZE above so batches arrive GPU-sized.
+      INGEST_QUEUE_WORKERS: ${INGEST_QUEUE_WORKERS:-2}
+      COLPALI_BATCH_SIZE: ${COLPALI_BATCH_SIZE:-16}
+      # 4 is sized for 320-dim pages (tomoro: ~5 MB JSON each vs Qdrant's
+      # ~32 MB cap). Fine for 128-dim models too — upsert is overlap-hidden.
+      INGEST_QDRANT_MULTIVECTOR_UPSERT_BATCH: ${INGEST_QDRANT_MULTIVECTOR_UPSERT_BATCH:-4}

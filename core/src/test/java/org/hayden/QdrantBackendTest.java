@@ -230,6 +230,122 @@ class QdrantBackendTest {
     }
 
     @Test
+    void ingest_issuesReplaceDeleteBeforeUpsert() {
+        // doIngest deletes any prior copy of the docId before writing. The
+        // delete endpoint is unstubbed (→ 404 → no-op), but WireMock still
+        // records that the request was sent.
+        mock.stubFor(post(urlEqualTo("/v1/embeddings"))
+                .willReturn(aResponse().withStatus(200)
+                        .withBody("{\"data\":[{\"embedding\":[0.5,0.5,0.5]}]}")));
+        mock.stubFor(get(urlEqualTo("/collections/docs"))
+                .willReturn(aResponse().withStatus(404)));
+        mock.stubFor(put(urlEqualTo("/collections/docs"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+        mock.stubFor(put(urlPathEqualTo("/collections/docs/points"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+
+        String b64 = Base64.getEncoder().encodeToString("Alpha beta gamma.".getBytes());
+        backend.ingest(new IngestRequest(
+                SourceType.INLINE, b64, "n.txt", "docs", null, 0L, "qdrant", null));
+
+        mock.verify(postRequestedFor(urlPathEqualTo("/collections/docs/points/delete")));
+    }
+
+    @Test
+    void deleteDocument_textOnlyKb_deletesChunks() {
+        mock.stubFor(post(urlPathEqualTo("/collections/docs/points/delete"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+        // docs_pages/points/delete unstubbed → 404 → no visual points, no image cleanup.
+
+        var r = backend.deleteDocument("docs", "d-1");
+
+        assertThat(r.textPointsDeleted()).isTrue();
+        assertThat(r.visualPointsDeleted()).isFalse();
+        assertThat(r.imagesRemoved()).isZero();
+        mock.verify(postRequestedFor(urlPathEqualTo("/collections/docs/points/delete"))
+                .withRequestBody(com.github.tomakehurst.wiremock.client.WireMock
+                        .matchingJsonPath("$.filter.must[0].match.value",
+                                com.github.tomakehurst.wiremock.client.WireMock.equalTo("d-1"))));
+    }
+
+    @Test
+    void deleteDocument_visualKb_deletesPagesAndImages() throws Exception {
+        java.nio.file.Path tmpRoot = java.nio.file.Files.createTempDirectory("qb-del-");
+        try {
+            QdrantBackend visualBackend = newBackendWithVisual(mock.baseUrl(), tmpRoot);
+            // Seed two page images for the doc in the filesystem store.
+            ColPaliPipeline pages = (ColPaliPipeline) getField(visualBackend, "pages");
+            org.hayden.backend.qdrant.FilesystemPageImageStore store =
+                    (org.hayden.backend.qdrant.FilesystemPageImageStore) getField(pages, "imageStore");
+            store.store("v-kb", "d-9", 1, "p1".getBytes());
+            store.store("v-kb", "d-9", 2, "p2".getBytes());
+
+            mock.stubFor(post(urlPathEqualTo("/collections/v-kb/points/delete"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+            mock.stubFor(post(urlPathEqualTo("/collections/v-kb_pages/points/delete"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+
+            var r = visualBackend.deleteDocument("v-kb", "d-9");
+
+            assertThat(r.textPointsDeleted()).isTrue();
+            assertThat(r.visualPointsDeleted()).isTrue();
+            assertThat(r.imagesRemoved()).isEqualTo(2);
+        } finally {
+            deleteTree(tmpRoot);
+        }
+    }
+
+    @Test
+    void deleteKnowledgeBase_dropsCollectionsImagesAndQueuedJobs() throws Exception {
+        java.nio.file.Path tmpRoot = java.nio.file.Files.createTempDirectory("qb-kbdel-");
+        try {
+            QdrantBackend visualBackend = newBackendWithVisual(mock.baseUrl(), tmpRoot);
+            ColPaliPipeline pages = (ColPaliPipeline) getField(visualBackend, "pages");
+            org.hayden.backend.qdrant.FilesystemPageImageStore store =
+                    (org.hayden.backend.qdrant.FilesystemPageImageStore) getField(pages, "imageStore");
+            store.store("v-kb", "d-9", 1, "p1".getBytes());
+            store.store("v-kb", "d-9", 2, "p2".getBytes());
+
+            IngestQueue queue = (IngestQueue) getField(visualBackend, "queue");
+            IngestRequest doomed = new IngestRequest(SourceType.INLINE, "x", "a.pdf",
+                    "v-kb", null, 0L, "qdrant", null, true);
+            IngestRequest other = new IngestRequest(SourceType.INLINE, "x", "b.pdf",
+                    "other-kb", null, 0L, "qdrant", null, true);
+            var doomedJob = queue.submit(org.hayden.jobs.IngestJob.queuedVisual(doomed, "d-1"));
+            var otherJob = queue.submit(org.hayden.jobs.IngestJob.queuedVisual(other, "d-2"));
+
+            mock.stubFor(get(urlEqualTo("/collections/v-kb"))
+                    .willReturn(aResponse().withStatus(200).withBody("""
+                            {"result":{"config":{"params":{"vectors":{"size":384,"distance":"Cosine"}}}}}""")));
+            mock.stubFor(com.github.tomakehurst.wiremock.client.WireMock.delete(urlEqualTo("/collections/v-kb"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+            mock.stubFor(get(urlEqualTo("/collections/v-kb_pages"))
+                    .willReturn(aResponse().withStatus(200).withBody("""
+                            {"result":{"config":{"params":{"vectors":{"original":{"size":128}}}}}}""")));
+            mock.stubFor(com.github.tomakehurst.wiremock.client.WireMock.delete(urlEqualTo("/collections/v-kb_pages"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+
+            var r = visualBackend.deleteKnowledgeBase("v-kb");
+
+            assertThat(r.textCollectionDropped()).isTrue();
+            assertThat(r.visualCollectionDropped()).isTrue();
+            assertThat(r.imagesRemoved()).isEqualTo(2);
+            assertThat(r.jobsCancelled()).isEqualTo(1);
+            mock.verify(com.github.tomakehurst.wiremock.client.WireMock
+                    .deleteRequestedFor(urlEqualTo("/collections/v-kb")));
+            mock.verify(com.github.tomakehurst.wiremock.client.WireMock
+                    .deleteRequestedFor(urlEqualTo("/collections/v-kb_pages")));
+            // Doomed KB's queued job cancelled; the other KB's untouched.
+            assertThat(queue.getJob(doomedJob.jobId()).orElseThrow().status())
+                    .isEqualTo(org.hayden.jobs.JobStatus.FAILED);
+            assertThat(queue.getJob(otherJob.jobId()).orElseThrow().status())
+                    .isEqualTo(org.hayden.jobs.JobStatus.QUEUED);
+        } finally {
+            deleteTree(tmpRoot);
+        }
+    }
+
+    @Test
     void search_embedsQueryThenCallsQdrantSearch() {
         mock.stubFor(post(urlEqualTo("/v1/embeddings"))
                 .willReturn(aResponse().withStatus(200)
@@ -295,16 +411,20 @@ class QdrantBackendTest {
                           {"name":"scans"},
                           {"name":"scans_pages"}
                         ]}}""")));
+        // Real 1.10+ Qdrant reports vectors_count as null (deprecated, lazily
+        // computed); points_count is the reliable field. Mirror that here.
         mock.stubFor(get(urlEqualTo("/collections/docs"))
                 .willReturn(aResponse().withStatus(200).withBody("""
                         {"result":{
-                          "vectors_count": 17,
+                          "points_count": 17,
+                          "vectors_count": null,
                           "config":{"params":{"vectors":{"size":3,"distance":"Cosine"}}}
                         }}""")));
         mock.stubFor(get(urlEqualTo("/collections/scans"))
                 .willReturn(aResponse().withStatus(200).withBody("""
                         {"result":{
-                          "vectors_count": 42,
+                          "points_count": 42,
+                          "vectors_count": null,
                           "config":{"params":{"vectors":{"size":3,"distance":"Cosine"}}}
                         }}""")));
         mock.stubFor(get(urlEqualTo("/collections/docs_pages"))
@@ -535,6 +655,300 @@ class QdrantBackendTest {
         }
     }
 
+    // ---- split visual-ingest routing tests ----------------------------------
+
+    @Test
+    void ingest_bigVisualPdf_ingestsTextSync_andQueuesVisualOnlyJob() throws Exception {
+        java.nio.file.Path tmpRoot = java.nio.file.Files.createTempDirectory("qb-split-");
+        try {
+            QdrantBackend visualBackend = newBackendWithVisual(mock.baseUrl(), tmpRoot);
+            // 1-page PDF at threshold 1 → queue route.
+            setField(visualBackend, "syncThresholdPages", 1);
+
+            mock.stubFor(get(urlEqualTo("/healthz"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"status\":\"ok\",\"ready\":true}")));
+            mock.stubFor(get(urlEqualTo("/info"))
+                    .willReturn(aResponse().withStatus(200).withBody("""
+                            {"model_name":"vidore/colqwen2-v1.0","vector_dim":2,
+                             "supports_pooled":true,"max_batch_size":8,"device":"cpu"}""")));
+            mock.stubFor(post(urlEqualTo("/v1/embeddings"))
+                    .willReturn(aResponse().withStatus(200).withBody("""
+                            {"data":[{"embedding":[0.1,0.2,0.3]}]}""")));
+            mock.stubFor(get(urlEqualTo("/collections/v-kb"))
+                    .willReturn(aResponse().withStatus(404)));
+            mock.stubFor(get(urlEqualTo("/collections/v-kb_pages"))
+                    .willReturn(aResponse().withStatus(404)));
+            mock.stubFor(put(urlEqualTo("/collections/v-kb"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+            mock.stubFor(put(urlEqualTo("/collections/v-kb_pages"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+            mock.stubFor(put(urlPathEqualTo("/collections/v-kb/points"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+
+            String b64 = Base64.getEncoder().encodeToString(makeTinyPdf(1));
+            IngestResult r = visualBackend.ingest(new IngestRequest(
+                    SourceType.INLINE, b64, "big.pdf",
+                    "v-kb", null, 0L, "qdrant", null, true));
+
+            // Queued status + job id, but the text side already landed.
+            assertThat(r.processingStatus()).isEqualTo("queued");
+            assertThat(r.jobId()).isNotNull();
+            assertThat(r.chunkCount()).isGreaterThan(0);
+            assertThat(r.addedToKb()).isTrue();
+            assertThat(r.pageCount()).isZero();
+
+            // Text pipeline ran; <kb>_pages was created eagerly; the VLM was NOT called.
+            mock.verify(putRequestedFor(urlPathEqualTo("/collections/v-kb/points")));
+            mock.verify(putRequestedFor(urlEqualTo("/collections/v-kb_pages")));
+            mock.verify(0, postRequestedFor(urlEqualTo("/embed_pages")));
+
+            // The queued job is visual-only.
+            IngestQueue queue = (IngestQueue) getField(visualBackend, "queue");
+            var job = queue.take(100, java.util.concurrent.TimeUnit.MILLISECONDS).orElseThrow();
+            assertThat(job.effectiveKind()).isEqualTo(org.hayden.jobs.JobKind.VISUAL);
+            assertThat(job.docId()).isEqualTo(r.fileId());
+        } finally {
+            deleteTree(tmpRoot);
+        }
+    }
+
+    @Test
+    void ingest_noTextLayerPdf_visualRequested_queuesVisualWithZeroChunks() throws Exception {
+        java.nio.file.Path tmpRoot = java.nio.file.Files.createTempDirectory("qb-notext-");
+        try {
+            QdrantBackend visualBackend = newBackendWithVisual(mock.baseUrl(), tmpRoot);
+            setField(visualBackend, "syncThresholdPages", 1);
+
+            mock.stubFor(get(urlEqualTo("/healthz"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"status\":\"ok\",\"ready\":true}")));
+            mock.stubFor(get(urlEqualTo("/info"))
+                    .willReturn(aResponse().withStatus(200).withBody("""
+                            {"model_name":"vidore/colqwen2-v1.0","vector_dim":2,
+                             "supports_pooled":true,"max_batch_size":8,"device":"cpu"}""")));
+            mock.stubFor(get(urlEqualTo("/collections/v-kb"))
+                    .willReturn(aResponse().withStatus(404)));
+            mock.stubFor(get(urlEqualTo("/collections/v-kb_pages"))
+                    .willReturn(aResponse().withStatus(404)));
+            mock.stubFor(put(urlEqualTo("/collections/v-kb"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+            mock.stubFor(put(urlEqualTo("/collections/v-kb_pages"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+
+            String b64 = Base64.getEncoder().encodeToString(makeBlankPdf(2));
+            IngestResult r = visualBackend.ingest(new IngestRequest(
+                    SourceType.INLINE, b64, "scan.pdf",
+                    "v-kb", null, 0L, "qdrant", null, true));
+
+            // No text layer is not a failure when the visual side is on:
+            // zero chunks, visual job queued.
+            assertThat(r.processingStatus()).isEqualTo("queued");
+            assertThat(r.jobId()).isNotNull();
+            assertThat(r.chunkCount()).isZero();
+            mock.verify(0, putRequestedFor(urlPathEqualTo("/collections/v-kb/points")));
+            mock.verify(0, postRequestedFor(urlEqualTo("/v1/embeddings")));
+
+            IngestQueue queue = (IngestQueue) getField(visualBackend, "queue");
+            var job = queue.take(100, java.util.concurrent.TimeUnit.MILLISECONDS).orElseThrow();
+            assertThat(job.effectiveKind()).isEqualTo(org.hayden.jobs.JobKind.VISUAL);
+        } finally {
+            deleteTree(tmpRoot);
+        }
+    }
+
+    @Test
+    void ingest_noTextLayerPdf_textOnly_stillFails() throws Exception {
+        mock.stubFor(get(urlEqualTo("/collections/t-kb"))
+                .willReturn(aResponse().withStatus(404)));
+        mock.stubFor(put(urlEqualTo("/collections/t-kb"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+        String b64 = Base64.getEncoder().encodeToString(makeBlankPdf(1));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> backend.ingest(new IngestRequest(
+                SourceType.INLINE, b64, "scan.pdf",
+                "t-kb", null, 0L, "qdrant", null, false)))
+                .isInstanceOf(org.hayden.ingest.NoTextLayerException.class);
+    }
+
+    @Test
+    void ingestForWorker_visualJob_runsOnlyVisualSide() throws Exception {
+        java.nio.file.Path tmpRoot = java.nio.file.Files.createTempDirectory("qb-split-");
+        try {
+            QdrantBackend visualBackend = newBackendWithVisual(mock.baseUrl(), tmpRoot);
+
+            mock.stubFor(get(urlEqualTo("/healthz"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"status\":\"ok\",\"ready\":true}")));
+            mock.stubFor(get(urlEqualTo("/info"))
+                    .willReturn(aResponse().withStatus(200).withBody("""
+                            {"model_name":"vidore/colqwen2-v1.0","vector_dim":2,
+                             "supports_pooled":true,"max_batch_size":8,"device":"cpu"}""")));
+            mock.stubFor(post(urlEqualTo("/embed_pages"))
+                    .willReturn(aResponse().withStatus(200).withBody("""
+                            {"embeddings":[
+                              {"page_id":"x","original":[[0.1,0.2]],"pooled_rows":[[0.1,0.2]],"pooled_cols":[[0.1,0.2]]}
+                            ]}""")));
+            mock.stubFor(get(urlEqualTo("/collections/v-kb_pages"))
+                    .willReturn(aResponse().withStatus(404)));
+            mock.stubFor(put(urlEqualTo("/collections/v-kb_pages"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+            mock.stubFor(put(urlPathEqualTo("/collections/v-kb_pages/points"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+
+            String b64 = Base64.getEncoder().encodeToString(makeTinyPdf(1));
+            IngestRequest req = new IngestRequest(
+                    SourceType.INLINE, b64, "big.pdf",
+                    "v-kb", null, 0L, "qdrant", null, true);
+            var job = org.hayden.jobs.IngestJob.queuedVisual(req, "doc-42");
+
+            IngestResult r = visualBackend.ingestForWorker(job);
+
+            assertThat(r.processingStatus()).isEqualTo("completed");
+            assertThat(r.pageCount()).isEqualTo(1);
+            assertThat(r.chunkCount()).isZero();
+            assertThat(r.fileId()).isEqualTo("doc-42");
+            // Retry cleanup: prior pages of this doc are deleted before writing.
+            mock.verify(postRequestedFor(urlPathEqualTo("/collections/v-kb_pages/points/delete")));
+            mock.verify(putRequestedFor(urlPathEqualTo("/collections/v-kb_pages/points")));
+            // The text side is untouched: no bge call, no chunk upsert.
+            mock.verify(0, postRequestedFor(urlEqualTo("/v1/embeddings")));
+            mock.verify(0, putRequestedFor(urlPathEqualTo("/collections/v-kb/points")));
+        } finally {
+            deleteTree(tmpRoot);
+        }
+    }
+
+    @Test
+    void ingestForWorker_legacyFullJob_runsBothPipelines() throws Exception {
+        java.nio.file.Path tmpRoot = java.nio.file.Files.createTempDirectory("qb-split-");
+        try {
+            QdrantBackend visualBackend = newBackendWithVisual(mock.baseUrl(), tmpRoot);
+
+            mock.stubFor(get(urlEqualTo("/healthz"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"status\":\"ok\",\"ready\":true}")));
+            mock.stubFor(get(urlEqualTo("/info"))
+                    .willReturn(aResponse().withStatus(200).withBody("""
+                            {"model_name":"vidore/colqwen2-v1.0","vector_dim":2,
+                             "supports_pooled":true,"max_batch_size":8,"device":"cpu"}""")));
+            mock.stubFor(post(urlEqualTo("/v1/embeddings"))
+                    .willReturn(aResponse().withStatus(200).withBody("""
+                            {"data":[{"embedding":[0.1,0.2,0.3]}]}""")));
+            mock.stubFor(post(urlEqualTo("/embed_pages"))
+                    .willReturn(aResponse().withStatus(200).withBody("""
+                            {"embeddings":[
+                              {"page_id":"x","original":[[0.1,0.2]],"pooled_rows":[[0.1,0.2]],"pooled_cols":[[0.1,0.2]]}
+                            ]}""")));
+            mock.stubFor(get(urlEqualTo("/collections/v-kb"))
+                    .willReturn(aResponse().withStatus(404)));
+            mock.stubFor(get(urlEqualTo("/collections/v-kb_pages"))
+                    .willReturn(aResponse().withStatus(404)));
+            mock.stubFor(put(urlEqualTo("/collections/v-kb"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+            mock.stubFor(put(urlEqualTo("/collections/v-kb_pages"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":true}")));
+            mock.stubFor(put(urlPathEqualTo("/collections/v-kb/points"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+            mock.stubFor(put(urlPathEqualTo("/collections/v-kb_pages/points"))
+                    .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+
+            String b64 = Base64.getEncoder().encodeToString(makeTinyPdf(1));
+            IngestRequest req = new IngestRequest(
+                    SourceType.INLINE, b64, "big.pdf",
+                    "v-kb", null, 0L, "qdrant", null, true);
+            // A job persisted before the kind field existed: kind == null → FULL.
+            var legacy = new org.hayden.jobs.IngestJob(
+                    "legacy-1", org.hayden.jobs.JobStatus.QUEUED, req, "doc-7",
+                    java.time.Instant.now(), null, null, null, null, List.of(), 0, null);
+            assertThat(legacy.effectiveKind()).isEqualTo(org.hayden.jobs.JobKind.FULL);
+
+            IngestResult r = visualBackend.ingestForWorker(legacy);
+
+            assertThat(r.chunkCount()).isGreaterThan(0);
+            assertThat(r.pageCount()).isEqualTo(1);
+            mock.verify(postRequestedFor(urlEqualTo("/v1/embeddings")));
+            mock.verify(postRequestedFor(urlEqualTo("/embed_pages")));
+        } finally {
+            deleteTree(tmpRoot);
+        }
+    }
+
+    // ---- per-doc-id write serialization -------------------------------------
+
+    @Test
+    void concurrentIngest_sameDocId_serializesDeleteAndWrite() throws Exception {
+        // Deterministic doc ids let two writers (upload batch + directory scan
+        // over one tree) target the same id at once. doIngest is delete-then-
+        // write; interleaved, the second's delete removes points the first
+        // just wrote. The per-doc-id lock must keep each delete+write whole.
+        java.util.List<String> events =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        java.util.concurrent.CountDownLatch firstInside =
+                new java.util.concurrent.CountDownLatch(1);
+
+        ChunkPipeline recordingChunks = new ChunkPipeline() {
+            @Override
+            public boolean deleteDoc(String kbName, String docId) {
+                events.add("delete");
+                return true;
+            }
+
+            @Override
+            public IngestResult ingestChunks(IngestRequest req,
+                                             org.hayden.ingest.FetchedFile file,
+                                             String docId) {
+                events.add("write-start");
+                firstInside.countDown();
+                try {
+                    Thread.sleep(150);   // window for the other writer to collide
+                } catch (InterruptedException ignored) {
+                }
+                events.add("write-end");
+                return new IngestResult("qdrant", req.kbName(), req.kbName(), docId,
+                        "completed", 1, 0, true, "ok", List.of(), null);
+            }
+
+            @Override
+            public boolean collectionExists(String kbName) {
+                return false;
+            }
+        };
+        ColPaliPipeline noVisual = new ColPaliPipeline() {
+            @Override
+            public boolean isEnabledFor(String kbName) {
+                return false;
+            }
+        };
+
+        FileFetcher fetcher = new FileFetcher();
+        setField(fetcher, "maxFileBytes", 1024L * 1024);
+        setField(fetcher, "connectTimeoutSeconds", 5L);
+        setField(fetcher, "requestTimeoutSeconds", 10L);
+        invokeInit(fetcher);
+
+        QdrantBackend racy = new QdrantBackend();
+        setField(racy, "fetcher", fetcher);
+        setField(racy, "chunks", recordingChunks);
+        setField(racy, "pages", noVisual);
+        setField(racy, "defaultVisualIndexEnabled", false);
+        setField(racy, "syncThresholdPages", Integer.MAX_VALUE);
+
+        String b64 = Base64.getEncoder().encodeToString("same doc".getBytes());
+        IngestRequest req = new IngestRequest(
+                SourceType.INLINE, b64, "a.txt", "docs", null, 0L, "qdrant", null, false);
+
+        Thread first = new Thread(() -> racy.ingest(req, "shared-doc-id"));
+        first.start();
+        assertThat(firstInside.await(2, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        // The first writer is mid-write; the second must now wait at the lock.
+        Thread second = new Thread(() -> racy.ingest(req, "shared-doc-id"));
+        second.start();
+        first.join(5000);
+        second.join(5000);
+
+        // Two whole delete+write sections, never interleaved — the second's
+        // delete must not land between the first's delete and write.
+        assertThat(events).containsExactly(
+                "delete", "write-start", "write-end",
+                "delete", "write-start", "write-end");
+    }
+
     // ---- helpers ------------------------------------------------------------
 
     /** Builds a backend with the visual path fully wired (sidecar + image store). */
@@ -573,6 +987,7 @@ class QdrantBackendTest {
         setField(pages, "qdrant", qdrant);
         setField(pages, "imageStore", store);
         setField(pages, "prefetchMultiplier", 10);
+        setField(pages, "multivectorUpsertBatchSize", 8);
 
         setField(backend, "pages", pages);
         setField(backend, "defaultVisualIndexEnabled", false);
@@ -583,6 +998,19 @@ class QdrantBackendTest {
         Field f = target.getClass().getDeclaredField(name);
         f.setAccessible(true);
         return f.get(target);
+    }
+
+    /** Pages with no content stream at all: what a scanned PDF looks like to PDFBox. */
+    private static byte[] makeBlankPdf(int numPages) throws java.io.IOException {
+        try (org.apache.pdfbox.pdmodel.PDDocument doc = new org.apache.pdfbox.pdmodel.PDDocument()) {
+            for (int i = 1; i <= numPages; i++) {
+                doc.addPage(new org.apache.pdfbox.pdmodel.PDPage(
+                        org.apache.pdfbox.pdmodel.common.PDRectangle.LETTER));
+            }
+            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+            doc.save(baos);
+            return baos.toByteArray();
+        }
     }
 
     private static byte[] makeTinyPdf(int numPages) throws java.io.IOException {

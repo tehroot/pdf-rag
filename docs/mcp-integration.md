@@ -70,8 +70,9 @@ Add an entry to `mcpServers` in `~/Library/Application Support/Claude/claude_des
 }
 ```
 
-Restart Claude Desktop. The four tools (`ingest_document`, `search_documents`,
-`list_knowledge_bases`, `get_file_status`) appear under the server's tool menu.
+Restart Claude Desktop. The eight tools (`ingest_document`, `search_documents`,
+`list_knowledge_bases`, `delete_document`, `get_file_status`, `inspect_page`,
+`get_ingest_status`, `drop_visual_index`) appear under the server's tool menu.
 
 If you also want the Open WebUI backend reachable from the same server, add:
 
@@ -119,16 +120,16 @@ mcp-cli connect --transport stdio \
   --env EMBED_MODEL=bge-large-en-v1.5
 ```
 
-The exact flag spelling varies between MCP CLIs; the shape ("command + args + env")
-is universal across stdio MCP hosts.
+Flag spelling varies between MCP CLIs; the shape ("command + args + env") is
+universal across stdio MCP hosts.
 
 ### Common stdio gotchas
 
 - **Absolute paths only** in `command`/`args`. MCP hosts have no meaningful CWD,
   and `~` is not expanded.
-- **Logs go to stderr** by design (so stdout stays clean for JSON-RPC). If
-  you're troubleshooting, look at the host's "MCP server log" panel — Claude
-  Desktop logs to `~/Library/Logs/Claude/mcp-server-rag-ingest.log`.
+- **Logs go to stderr** by design (so stdout stays clean for JSON-RPC). When
+  troubleshooting, check the host's "MCP server log" panel — Claude Desktop
+  logs to `~/Library/Logs/Claude/mcp-server-rag-ingest.log`.
 - **No shell expansion.** `"$HOME"` won't be substituted in the `command`
   array. Use literal paths.
 - **Env is per-server.** Setting `QDRANT_URL` in your shell won't leak into a
@@ -163,12 +164,12 @@ RAG) and `ingest_document` (write to that same Qdrant collection or, with
 1. Admin Panel → Settings → Tools / MCP Servers.
 2. Add a server with transport **Streamable HTTP** and URL
    `http://localhost:8080/mcp`.
-3. Enable the server; the four tools appear in the chat tool picker.
+3. Enable the server; the eight tools appear in the chat tool picker.
 
-Recursion warning: if Open WebUI is using *this* server's `search_documents`
-for its RAG and we're also using `backend="openwebui"` to write to Open WebUI's
-own KB, you have two parallel knowledge bases. That's usually a bug, not a
-feature — pick one storage backend per logical corpus.
+Recursion warning: if Open WebUI uses *this* server's `search_documents` for
+its RAG while we also write to Open WebUI's own KB via `backend="openwebui"`,
+you have two parallel knowledge bases — usually a bug, not a feature. Pick one
+storage backend per logical corpus.
 
 ### Browser-based MCP hosts (LibreChat, AnythingLLM, etc.)
 
@@ -205,7 +206,7 @@ optional `backend` argument. Behavior:
 | `"openwebui"` | Open WebUI pipeline. `search_documents` is unsupported. |
 | `"all"` (only meaningful on `list_knowledge_bases`) | Merge collections + KBs across both. |
 
-A typical agent prompt looks like:
+A typical agent prompt:
 
 > "Ingest https://example.com/specs.pdf into the `engineering-docs` knowledge
 > base, then search it for 'rate limiting strategy'."
@@ -242,7 +243,7 @@ metadata for the model to reason over.
 
 The `metadata` arg on `ingest_document` (Qdrant backend only) is a key/value
 map stored alongside each chunk. At search time, the `filter` arg performs an
-exact-match match on those keys. Useful patterns:
+exact match on those keys. Useful patterns:
 
 ```json
 // Ingest

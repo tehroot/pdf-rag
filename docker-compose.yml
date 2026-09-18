@@ -13,9 +13,14 @@
 # Configuration: copy .env.example to .env and edit. All knobs in this file
 # come from env vars; the bare `docker compose up` works once .env is in place.
 #
-# The colpali-server image defaults to the CPU build; for GPU acceleration,
-# set COLPALI_DOCKERFILE=Dockerfile.cuda in the environment and uncomment the
-# `deploy.resources.reservations.devices` block.
+# CPU vs GPU: this base file is CPU-only (sidecar builds Dockerfile.cpu, runs
+# on `cpu`). A committed docker-compose.override.yml symlink → docker-compose.gpu.yml
+# is auto-loaded by plain `docker compose`, which flips the sidecar to the CUDA
+# build + GPU reservation — so on an NVIDIA host `docker compose up -d` is GPU
+# by default. On a CPU host that override would fail (no nvidia runtime); bypass
+# it with an explicit base file or the scripts (which pass explicit -f):
+#   docker compose -f docker-compose.yml up -d     # CPU
+#   scripts/up.sh           # CPU      scripts/up.sh --gpu     # GPU
 
 services:
   qdrant:
@@ -27,7 +32,19 @@ services:
       - "${QDRANT_PORT:-6333}:6333"     # REST
       - "${QDRANT_GRPC_PORT:-6334}:6334"   # gRPC (unused by us; exposed for tooling)
     volumes:
-      - qdrant-data:/qdrant/storage
+      # Default: docker named volume. Point QDRANT_DATA_DIR at an absolute
+      # host path (e.g. a ZFS dataset like /tank/qdrant) to bind-mount instead
+      # — a path with a leading / becomes a bind mount, a bare name stays a
+      # named volume. Migrate existing data before switching (see
+      # docs/deployment.md).
+      - ${QDRANT_DATA_DIR:-qdrant-data}:/qdrant/storage
+    # Bulk ingests fan RocksDB out across many segment files; the docker
+    # default nofile limit (often 1024 soft) dies with "too many open files"
+    # mid-upsert. 65536 is comfortable headroom for large KBs.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     restart: unless-stopped
     healthcheck:
       # The qdrant image is debian-slim without wget; use a TCP probe via the
@@ -44,12 +61,19 @@ services:
     # The /models mount is the host's ./models directory.
     image: ghcr.io/ggml-org/llama.cpp:server
     container_name: pdf-rag-llama
+    # --parallel N serves N embedding requests concurrently (continuous
+    # batching) — a single slot leaves a multi-core host idle and caps CPU
+    # embedding around ~23 chunks/s. NOTE: --ctx-size is divided across slots
+    # (8192 / 4 = 2048 per slot), so keep ctx-per-slot above the model's token
+    # cap (512 for bge-*) when raising LLAMA_PARALLEL.
     command: >
       -m /models/${LLAMA_MODEL_FILE:-bge-small-en-v1.5-f16.gguf}
       --embeddings
       --host 0.0.0.0
       --port 8081
       --ctx-size ${LLAMA_CTX_SIZE:-8192}
+      --parallel ${LLAMA_PARALLEL:-4}
+      --cont-batching
     volumes:
       - ./models:/models:ro
     ports:
@@ -78,14 +102,40 @@ services:
       - "${COLPALI_PORT:-8090}:8090"
     environment:
       COLPALI_MODEL: ${COLPALI_MODEL:-vidore/colsmolvlm-v0.1}
+      # Pin the Hub revision. Empty = "main", which is NOT safe for
+      # trust_remote_code models (tomoro-colqwen3): the repo ships the
+      # modeling code this process executes, so an upstream push can change
+      # or break the running model with no change on our side. See
+      # .env.example for the known-good hash.
+      COLPALI_MODEL_REVISION: ${COLPALI_MODEL_REVISION:-}
       COLPALI_DEVICE: ${COLPALI_DEVICE:-cpu}
       COLPALI_DTYPE: ${COLPALI_DTYPE:-float32}
       COLPALI_MAX_BATCH_SIZE: ${COLPALI_MAX_BATCH_SIZE:-4}
+      # Qwen3-VL-class models (tomoro handle): visual-token cap + attention
+      # impl. Ignored by colpali-engine models.
+      COLPALI_MAX_VISUAL_TOKENS: ${COLPALI_MAX_VISUAL_TOKENS:-1280}
+      COLPALI_ATTN_IMPL: ${COLPALI_ATTN_IMPL:-sdpa}
     volumes:
       # Cache HF model downloads on the host so container restarts don't
       # re-fetch multi-GB checkpoints.
       - hf-cache:/root/.cache/huggingface
     restart: unless-stopped
+    # Overrides the Dockerfile healthcheck only to stretch start_period:
+    # first boot downloads a multi-GB checkpoint from HF, and pdf-rag-http
+    # now waits for service_healthy — an "unhealthy" verdict during a slow
+    # first download would block the whole stack. Failures inside
+    # start_period don't count; ready:true flips healthy immediately.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys,json; d=json.loads(urllib.request.urlopen('http://localhost:8090/healthz',timeout=4).read()); sys.exit(0 if d.get('ready') else 1)"]
+      interval: 30s
+      # The embed endpoint blocks the sidecar's event loop for the whole
+      # batch (7 s+ under load), so a 5 s probe timeout flips a BUSY sidecar
+      # to "unhealthy" and compose then refuses to start dependents (seen
+      # 2026-09-17: pdf-rag-http left stopped). Probe timeout must exceed a
+      # batch. See docs/plans/sidecar-throughput-v1.md step 2 for the fix.
+      timeout: 40s
+      retries: 5
+      start_period: 15m
     # For GPU acceleration, layer in docker-compose.gpu.yml — see that file
     # for the host-side prerequisites and activation commands.
 
@@ -99,8 +149,11 @@ services:
         condition: service_healthy
       llama-server:
         condition: service_healthy
+      # service_healthy = model loaded (sidecar reports ready:true), so a
+      # stack restart can't start draining visual jobs against a sidecar
+      # that's still loading — that fast-failed 130 queued jobs once.
       colpali-server:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "${PDF_RAG_PORT:-8080}:8080"
     environment:
@@ -118,13 +171,32 @@ services:
       EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE:-64}
 
       # Chunking — keep INGEST_CHUNK_SIZE_CHARS below the embedding model's
-      # max sequence length when tokenized. bge-* models are 512 tokens hard;
-      # 1000 chars is safe for dense technical text (data sheets, code).
-      INGEST_CHUNK_SIZE_CHARS: ${INGEST_CHUNK_SIZE_CHARS:-1500}
+      # max sequence length when tokenized. bge-* models are 512 tokens hard,
+      # and the default EMBED_MODEL here is bge-small: 1500 chars busts the cap
+      # on dense technical text (llama-server rejects with "input too large"),
+      # so the compose default is 700.
+      INGEST_CHUNK_SIZE_CHARS: ${INGEST_CHUNK_SIZE_CHARS:-700}
       INGEST_CHUNK_OVERLAP_CHARS: ${INGEST_CHUNK_OVERLAP_CHARS:-200}
 
       # ColPali sidecar
       COLPALI_SIDECAR_URL: http://colpali-server:8090
+      # JVM sizing passthrough. The eclipse-temurin runtime image takes the
+      # JDK default heap (25% of host RAM, ergonomic: 30 GiB on a 188 GiB
+      # host). A bulk visual ingest holds, per queue worker, a ~78 MB JSON
+      # embed response, its boxed-double parse (~120 MB), and a document's
+      # accumulated page vectors (330 MB for 200 pages), so 24 workers filled
+      # that heap and embed reads failed with "IOException: Java heap space"
+      # (R530, 2026-09-17). Set e.g. PDF_RAG_JAVA_TOOL_OPTIONS=-Xmx64g in .env
+      # for a large-worker deployment. Empty = JDK defaults.
+      JAVA_TOOL_OPTIONS: ${PDF_RAG_JAVA_TOOL_OPTIONS:-}
+      # Qdrant write transport for the <kb>_pages multivector upserts and the
+      # sidecar wire encoding (see QdrantGrpcUpserter / ColPaliClient). The
+      # defaults are what the code uses; these lines only make .env overrides
+      # reach the container.
+      INGEST_QDRANT_UPSERT_TRANSPORT: ${INGEST_QDRANT_UPSERT_TRANSPORT:-grpc}
+      INGEST_QDRANT_GRPC_HOST: ${INGEST_QDRANT_GRPC_HOST:-auto}
+      INGEST_QDRANT_GRPC_PORT: ${INGEST_QDRANT_GRPC_PORT:-6334}
+      INGEST_COLPALI_WIRE_ENCODING: ${INGEST_COLPALI_WIRE_ENCODING:-f32b64}
       COLPALI_BATCH_SIZE: ${COLPALI_BATCH_SIZE:-4}
 
       # Async ingest queue — aggressively queue on CPU sidecars
@@ -134,6 +206,15 @@ services:
 
       # Page-image storage (rendered PNGs for inspect_page)
       INGEST_PAGE_STORE_ROOT: /var/lib/pdf-rag-ingest/page-images
+
+      # Upload document store (POST /ingest/upload). /documents is the
+      # read-write mount below; the multipart temp dir sits inside it so the
+      # atomic-rename store path never crosses filesystems. The body cap is
+      # the primary upload size defence (413) — keep it equal to
+      # ingest.upload.max_request_bytes if you override either.
+      INGEST_UPLOAD_ROOT: /documents
+      UPLOAD_TMP_DIR: /documents/.tmp
+      UPLOAD_MAX_BODY_SIZE: ${UPLOAD_MAX_BODY_SIZE:-2G}
 
       # Fusion config
       FUSION_STRATEGY: ${FUSION_STRATEGY:-rrf}
@@ -152,13 +233,36 @@ services:
       # MCP transport
       MCP_CORS_ORIGINS: ${MCP_CORS_ORIGINS:-*}
     volumes:
-      - page-images:/var/lib/pdf-rag-ingest/page-images
-      - ingest-queue:/var/lib/pdf-rag-ingest/queue
+      # Same named-volume-or-bind pattern as qdrant-data: set
+      # PAGE_IMAGES_DIR=/tank/page-images (etc.) to move the PNG store —
+      # the bulkiest artifact (~1 MB/page) — onto big storage.
+      - ${PAGE_IMAGES_DIR:-page-images}:/var/lib/pdf-rag-ingest/page-images
+      - ${INGEST_QUEUE_DIR:-ingest-queue}:/var/lib/pdf-rag-ingest/queue
+      # Durable document store for POST /ingest/upload — the corpus of record,
+      # read-WRITE (the first writable mount on this service). Same named-
+      # volume-or-bind pattern as QDRANT_DATA_DIR: set
+      # INGEST_DOCUMENTS_DIR=/tank/documents to put it on a ZFS dataset
+      # (recommended: its own dataset with a quota, so a fill can't starve
+      # the qdrant storage). Files are written root:root; set user: on this
+      # service if you need different ownership.
+      - ${INGEST_DOCUMENTS_DIR:-documents}:/documents
       # Host inbox for documents the agent can ingest via source_type=path.
       # Useful when a target URL is fronted by a CDN (akamai/cloudflare) that
       # rejects server-side fetches — scp/cp the file in, then say "ingest
       # /docs/<filename>.pdf" in the chat.
       - ${INGEST_INBOX:-./incoming}:/docs:ro
+      # Broad host access for the REST directory-ingest surface: host paths
+      # under $INGEST_HOST_ROOT appear inside the container at /host, so
+      # POST /ingest/directory takes "directory": "/host/<path>". Defaults to
+      # the invoking user's $HOME; set INGEST_HOST_ROOT=/ in .env to expose
+      # the entire host filesystem (Linux only — macOS Docker Desktop doesn't
+      # file-share "/"). Read-only, but remember the REST surface has no auth:
+      # anything mounted here is indexable+searchable by whoever reaches :8080.
+      # On Linux, set INGEST_HOST_MOUNT_OPTS=ro,rslave so NFS/SMB shares
+      # (re)mounted on the host AFTER container creation stay visible; the
+      # rprivate default freezes the mount table at creation time. (rslave
+      # can't be the default here — macOS Docker Desktop rejects it.)
+      - ${INGEST_HOST_ROOT:-${HOME}}:/host:${INGEST_HOST_MOUNT_OPTS:-ro}
     restart: unless-stopped
 
 volumes:
@@ -166,3 +270,4 @@ volumes:
   hf-cache:
   page-images:
   ingest-queue:
+  documents:

@@ -23,6 +23,19 @@
             <groupId>io.quarkiverse.mcp</groupId>
             <artifactId>quarkus-mcp-server-http</artifactId>
         </dependency>
+        <!-- Plain JAX-RS REST endpoints (e.g. POST /ingest/directory) served on
+             the same Vert.x HTTP server as the MCP /mcp endpoint. -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-rest-jackson</artifactId>
+        </dependency>
+        <!-- OpenAPI schema (/q/openapi) + Swagger UI (/q/swagger-ui) for the REST
+             surface above. Auto-scans the JAX-RS resources; the MCP /mcp endpoint
+             is not JAX-RS so it is not (and should not be) in the schema. -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-smallrye-openapi</artifactId>
+        </dependency>
     </dependencies>
 
     <build>

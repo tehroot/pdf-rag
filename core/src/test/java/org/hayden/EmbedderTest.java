@@ -113,6 +113,53 @@ class EmbedderTest {
                 .hasMessageContaining("vectors for");
     }
 
+    @Test
+    void embed_isolatesAndTruncatesOverlargeInput_restOfBatchUnaffected() {
+        // Any request whose body carries the 700+ char run of X's is "too
+        // large" (llama-server's token-cap rejection); everything else embeds.
+        String tooLong = "X".repeat(1000);
+        server.stubFor(post(urlEqualTo("/v1/embeddings"))
+                .withRequestBody(com.github.tomakehurst.wiremock.client.WireMock.matching(".*X{700,}.*"))
+                .atPriority(1)
+                .willReturn(aResponse().withStatus(500).withBody(
+                        "{\"error\":{\"code\":500,\"message\":\"input (612 tokens) is too large to process. increase the physical batch size\"}}")));
+        server.stubFor(post(urlEqualTo("/v1/embeddings"))
+                .atPriority(5)
+                .willReturn(aResponse().withStatus(200)
+                        .withBody("{\"data\":[{\"embedding\":[0.5]}]}")));
+
+        List<float[]> out = embedder.embed(List.of("short-a", tooLong, "short-b"));
+
+        // Batch rejected once, then per-input: short-a ok, X1000 → X750 (still
+        // too large) → X562 ok, short-b ok. 6 requests, 3 vectors, order kept.
+        assertThat(out).hasSize(3);
+        assertThat(out.get(1)).containsExactly(0.5f);
+        server.verify(6, postRequestedFor(urlEqualTo("/v1/embeddings")));
+    }
+
+    @Test
+    void embed_overflowThatNeverFits_throwsAtFloor() {
+        server.stubFor(post(urlEqualTo("/v1/embeddings"))
+                .willReturn(aResponse().withStatus(500).withBody(
+                        "{\"error\":{\"message\":\"input (9999 tokens) is too large to process\"}}")));
+
+        assertThatThrownBy(() -> embedder.embed(List.of("Y".repeat(120))))
+                .isInstanceOf(IngestException.class)
+                .hasMessageContaining("still rejected as too large");
+    }
+
+    @Test
+    void embed_nonOverflowServerError_throwsWithoutRetrying() {
+        server.stubFor(post(urlEqualTo("/v1/embeddings"))
+                .willReturn(aResponse().withStatus(500)
+                        .withBody("{\"error\":{\"message\":\"model failed to load\"}}")));
+
+        assertThatThrownBy(() -> embedder.embed(List.of("alpha")))
+                .isInstanceOf(IngestException.class)
+                .hasMessageContaining("HTTP 500");
+        server.verify(1, postRequestedFor(urlEqualTo("/v1/embeddings")));
+    }
+
     private static Embedder newEmbedder(String baseUrl, String model, int batchSize, String apiKey)
             throws Exception {
         Embedder e = new Embedder();

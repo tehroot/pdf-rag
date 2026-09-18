@@ -13,6 +13,7 @@ import org.apache.tika.sax.BodyContentHandler;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hayden.ingest.FetchedFile;
 import org.hayden.ingest.IngestException;
+import org.hayden.ingest.NoTextLayerException;
 import org.hayden.ingest.PageText;
 import org.xml.sax.SAXException;
 
@@ -50,7 +51,7 @@ public class TextExtractor {
 
         String text = handler.toString();
         if (text == null || text.isBlank()) {
-            throw new IngestException("Tika extracted no text from " + file.filename()
+            throw new NoTextLayerException("Tika extracted no text from " + file.filename()
                     + " (content-type=" + file.contentType() + ")");
         }
         return text;
@@ -107,7 +108,7 @@ public class TextExtractor {
             }
             boolean anyContent = out.stream().anyMatch(p -> !p.text().isBlank());
             if (!anyContent) {
-                throw new IngestException("PDFBox extracted no text from "
+                throw new NoTextLayerException("PDFBox extracted no text from "
                         + file.filename() + " (likely a scanned PDF without a text layer; "
                         + "ColPali / OCR is required to read it)");
             }

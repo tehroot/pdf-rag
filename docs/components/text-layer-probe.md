@@ -145,5 +145,5 @@ text content via PDFBox itself.
 - Invalid thresholds (`low > full`) rejected at probe time.
 - `classify` boundary values exercised: 0, 49, 50, 499, 500.
 
-The boundary tests are important — the `<` vs `<=` semantics on thresholds
-matters for reproducibility, and these tests lock the behavior down.
+The boundary tests lock down the `<` vs `<=` threshold semantics, which
+matter for reproducibility.

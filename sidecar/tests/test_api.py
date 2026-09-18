@@ -9,6 +9,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from colpali_server import config as cfg_module
+
 from .fakes import make_b64_png
 
 
@@ -119,3 +121,29 @@ def test_embed_query_rejects_blank(client: TestClient) -> None:
 def test_embed_query_rejects_missing_field(client: TestClient) -> None:
     r = client.post("/embed_query", json={})
     assert r.status_code == 422
+
+
+# --- Hub revision pinning ----------------------------------------------------
+#
+# The sidecar executes modeling code shipped by the checkpoint repo
+# (trust_remote_code). An unpinned revision means an upstream push changes what
+# this process runs — that is how tomoro-colqwen3 broke on 2026-08-14. These
+# tests guard the plumbing, not the download: the env var name and the
+# empty-string-means-main normalization the handles rely on.
+
+
+def test_model_revision_defaults_to_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("COLPALI_MODEL_REVISION", raising=False)
+    cfg_module.reset_settings_for_testing()
+    assert cfg_module.settings().model_revision == ""
+    # The handles pass `cfg.model_revision or None`; empty must become None so
+    # from_pretrained falls back to "main" rather than requesting revision "".
+    assert (cfg_module.settings().model_revision or None) is None
+
+
+def test_model_revision_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    sha = "bf790bd8780b098b86453444632a184bb770be1a"
+    monkeypatch.setenv("COLPALI_MODEL_REVISION", sha)
+    cfg_module.reset_settings_for_testing()
+    assert cfg_module.settings().model_revision == sha
+    assert (cfg_module.settings().model_revision or None) == sha

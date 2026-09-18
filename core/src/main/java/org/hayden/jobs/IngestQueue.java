@@ -113,6 +113,15 @@ public class IngestQueue {
         return List.copyOf(jobs.values());
     }
 
+    /** Jobs filtered by status (null → all), most recently submitted first. */
+    public List<IngestJob> listJobs(JobStatus status) {
+        return jobs.values().stream()
+                .filter(j -> status == null || j.status() == status)
+                .sorted(java.util.Comparator.comparing(IngestJob::submittedAt,
+                        java.util.Comparator.nullsLast(java.util.Comparator.reverseOrder())))
+                .toList();
+    }
+
     public void markCompleted(String jobId, IngestResult result) {
         update(jobId, job -> job.withCompleted(Instant.now(), result));
     }
@@ -126,6 +135,40 @@ public class IngestQueue {
             }
             return job.withFailed(Instant.now(), errorMessage);
         });
+    }
+
+    /**
+     * Put a job back in line after a transient infrastructure failure (e.g.
+     * the ColPali sidecar is down). Unlike {@link #markFailed}, this carries
+     * no retry penalty: the condition belongs to the environment, not the
+     * job, so it must not consume the crash-recovery retry budget.
+     */
+    public void requeueTransient(String jobId) {
+        update(jobId, job -> job.withStatus(JobStatus.QUEUED));
+        pending.offer(jobId);
+    }
+
+    /**
+     * Cancel every QUEUED job for a knowledge base (KB deletion support:
+     * a pending visual job draining after the KB's collections are dropped
+     * would resurrect a stub {@code <kb>_pages}). Removing the id from the
+     * pending line first is the atomic claim — if a worker won the race and
+     * already took the job, it is skipped here (documented caveat: one
+     * in-flight job can still complete after the delete; delete again or
+     * ignore the stub). Returns the number cancelled.
+     */
+    public int cancelPending(String kbName) {
+        int cancelled = 0;
+        for (IngestJob job : jobs.values()) {
+            if (job.status() == JobStatus.QUEUED
+                    && kbName.equals(job.request().kbName())
+                    && pending.remove(job.jobId())) {
+                update(job.jobId(), j -> j.withFailed(Instant.now(),
+                        "Cancelled: knowledge base '" + kbName + "' deleted"));
+                cancelled++;
+            }
+        }
+        return cancelled;
     }
 
     /** Number of jobs awaiting a worker. Useful for backpressure and tests. */

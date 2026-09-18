@@ -11,11 +11,12 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 
 from .config import Settings, settings
 from .model import ModelHandle
 from .schemas import (
+    ENCODINGS,
     EmbedPagesRequest,
     EmbedPagesResponse,
     EmbedQueryRequest,
@@ -100,6 +101,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
                 pooled_methods=["rows", "cols"] if cfg.enable_pooled else [],
                 max_batch_size=cfg.max_batch_size,
                 device=handle.device,
+                encodings=list(ENCODINGS),
             )
         # Pre-load fallback: report configured values; vector_dim is a guess.
         return InfoResponse(
@@ -111,8 +113,8 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             device="not-yet-loaded",
         )
 
-    @app.post("/embed_pages", response_model=EmbedPagesResponse)
-    async def embed_pages(req: EmbedPagesRequest) -> EmbedPagesResponse:
+    @app.post("/embed_pages", responses={200: {"model": EmbedPagesResponse}})
+    async def embed_pages(req: EmbedPagesRequest) -> Response:
         handle = get_model_handle()
         if len(req.pages) > cfg.max_batch_size:
             raise HTTPException(
@@ -123,9 +125,12 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             )
         # Local import keeps the inference module's torch-touching code out of
         # the module-load path for environments without ML deps.
-        from .inference import embed_pages_inference
+        from .inference import embed_pages_bytes
 
-        return embed_pages_inference(handle, req, cfg)
+        # Bytes straight from numpy via orjson; the pydantic response model
+        # is documentation only here (see inference.embed_pages_bytes).
+        return Response(content=embed_pages_bytes(handle, req, cfg),
+                        media_type="application/json")
 
     @app.post("/embed_query", response_model=EmbedQueryResponse)
     async def embed_query(req: EmbedQueryRequest) -> EmbedQueryResponse:

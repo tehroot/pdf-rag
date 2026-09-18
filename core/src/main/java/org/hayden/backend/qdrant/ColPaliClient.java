@@ -2,18 +2,23 @@ package org.hayden.backend.qdrant;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hayden.ingest.IngestException;
+import org.hayden.ingest.SidecarUnavailableException;
+import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
@@ -61,6 +66,20 @@ public class ColPaliClient {
 
     @ConfigProperty(name = "ingest.colpali.batch-size", defaultValue = "8")
     int batchSize;
+
+    /**
+     * Wire encoding requested for the page vectors: {@code json} (lists of
+     * numbers), {@code f32b64} (base64 little-endian float32, bit-identical
+     * to json, 2.3x smaller, one-pass decode) or {@code f16b64} (float16,
+     * 4.6x smaller, exact for the model's bf16 outputs above 6.1e-5). A
+     * sidecar that predates the field ignores it and answers json; the
+     * parser accepts either form per field, so the two sides roll
+     * independently. JSON parsing of a 12-page batch built ~5 million boxed
+     * Doubles per worker and set the ingest JVM's heap ceiling (R530,
+     * 2026-09-17).
+     */
+    @ConfigProperty(name = "ingest.colpali.wire-encoding", defaultValue = "f32b64")
+    String wireEncoding;
 
     @Inject
     ObjectMapper objectMapper;
@@ -139,7 +158,8 @@ public class ColPaliClient {
             items.add(new EmbedPagesRequest.PageItem(p.pageId(),
                     Base64.getEncoder().encodeToString(p.pngBytes())));
         }
-        EmbedPagesRequest body = new EmbedPagesRequest(items, true, true);
+        String encoding = (wireEncoding == null || wireEncoding.isBlank()) ? "json" : wireEncoding;
+        EmbedPagesRequest body = new EmbedPagesRequest(items, true, true, encoding);
 
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(stripTrailingSlash(baseUrl) + "/embed_pages"))
@@ -161,9 +181,9 @@ public class ColPaliClient {
             EmbedPagesResponse.PageEmbeddingDto dto = parsed.embeddings.get(i);
             out.add(new PageEmbedding(
                     dto.page_id,
-                    to2DFloat(dto.original),
-                    to2DFloat(dto.pooled_rows),
-                    to2DFloat(dto.pooled_cols)));
+                    decodeVectors(dto.original, dto.dim, dto.encoding),
+                    decodeVectors(dto.pooled_rows, dto.dim, dto.encoding),
+                    decodeVectors(dto.pooled_cols, dto.dim, dto.encoding)));
         }
         return out;
     }
@@ -195,25 +215,65 @@ public class ColPaliClient {
 
     // ---- plumbing -----------------------------------------------------------
 
+    private static final Logger LOG = Logger.getLogger(ColPaliClient.class);
+
+    /** Attempts per request. Embedding is a pure function of the request, so a retry is safe. */
+    static final int SEND_ATTEMPTS = 2;
+    static final long RETRY_DELAY_MS = 2_000;
+
     private <T> T sendForJson(HttpRequest req, TypeReference<T> type) {
         HttpResponse<byte[]> resp = sendRaw(req);
-        if (resp.statusCode() / 100 != 2) {
-            throw new IngestException("ColPali sidecar " + req.method() + " " + req.uri()
-                    + " returned HTTP " + resp.statusCode() + ": "
-                    + new String(resp.body(), StandardCharsets.UTF_8));
+        int code = resp.statusCode();
+        if (code / 100 != 2) {
+            String body = new String(resp.body(), StandardCharsets.UTF_8);
+            String msg = "ColPali sidecar " + req.method() + " " + req.uri()
+                    + " returned HTTP " + code + ": " + body;
+            // 502/503/504 come from a proxy or balancer in front of the
+            // sidecar(s) (no live upstream, restart window): an environment
+            // condition, so the queue worker requeues instead of failing.
+            if (code == 502 || code == 503 || code == 504) {
+                throw new SidecarUnavailableException(msg);
+            }
+            throw new IngestException(msg);
         }
         return readJson(resp.body(), type);
     }
 
+    /**
+     * Send with one retry on I/O failure. Observed on the R530 pool
+     * (2026-09-17): about 0.5% of embed POSTs failed with an IOException
+     * while the balancer logged a 200 for every request it saw and no TCP
+     * close crossed the wire — i.e. a client-side condition. A second
+     * attempt on a fresh connection is cheap; if it also fails the job is
+     * requeued as transient rather than lost, and the exception class and
+     * message are logged so the cause can be seen.
+     */
     private HttpResponse<byte[]> sendRaw(HttpRequest req) {
-        try {
-            return http.send(req, HttpResponse.BodyHandlers.ofByteArray());
-        } catch (IOException e) {
-            throw new IngestException("I/O error calling ColPali sidecar at " + req.uri(), e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IngestException("Interrupted calling ColPali sidecar at " + req.uri(), e);
+        IOException last = null;
+        for (int attempt = 1; attempt <= SEND_ATTEMPTS; attempt++) {
+            try {
+                return http.send(req, HttpResponse.BodyHandlers.ofByteArray());
+            } catch (IOException e) {
+                last = e;
+                LOG.warnf("ColPali sidecar %s %s attempt %d/%d failed: %s: %s",
+                        req.method(), req.uri(), attempt, SEND_ATTEMPTS,
+                        e.getClass().getName(), e.getMessage());
+                if (attempt < SEND_ATTEMPTS) {
+                    try {
+                        Thread.sleep(RETRY_DELAY_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IngestException("Interrupted calling ColPali sidecar at " + req.uri(), ie);
+                    }
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IngestException("Interrupted calling ColPali sidecar at " + req.uri(), e);
+            }
         }
+        throw new SidecarUnavailableException("I/O error calling ColPali sidecar at " + req.uri()
+                + " after " + SEND_ATTEMPTS + " attempts: "
+                + last.getClass().getSimpleName() + ": " + last.getMessage());
     }
 
     private <T> T readJson(byte[] body, TypeReference<T> type) {
@@ -237,16 +297,60 @@ public class ColPaliClient {
         return s.endsWith("/") ? s.substring(0, s.length() - 1) : s;
     }
 
-    private static float[][] to2DFloat(List<List<Double>> raw) {
-        if (raw == null) {
+    /**
+     * One vector array from the wire: a JSON array of arrays (encoding
+     * {@code json}, or any sidecar that ignored the request field) or a
+     * base64 string of row-major little-endian floats ({@code f32b64} /
+     * {@code f16b64}, {@code dim} floats per row; "" is an empty array).
+     */
+    public static float[][] decodeVectors(JsonNode node, Integer dim, String encoding) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
             return new float[0][];
         }
+        if (node.isArray()) {
+            return to2DFloat(node);
+        }
+        if (!node.isTextual()) {
+            throw new IngestException("Unexpected vector encoding in sidecar response: " + node.getNodeType());
+        }
+        String b64 = node.asText();
+        if (b64.isEmpty()) {
+            return new float[0][];
+        }
+        if (dim == null || dim <= 0) {
+            throw new IngestException("Sidecar sent base64 vectors without a positive dim");
+        }
+        boolean half = "f16b64".equals(encoding);
+        int width = half ? 2 : 4;
+        byte[] raw = Base64.getDecoder().decode(b64);
+        if (raw.length % (width * dim) != 0) {
+            throw new IngestException("Sidecar base64 vectors: " + raw.length
+                    + " bytes is not a multiple of " + width + "*dim(" + dim + ")");
+        }
+        int rows = raw.length / (width * dim);
+        ByteBuffer buf = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN);
+        float[][] out = new float[rows][dim];
+        for (int i = 0; i < rows; i++) {
+            float[] row = out[i];
+            if (half) {
+                for (int j = 0; j < dim; j++) {
+                    row[j] = Float.float16ToFloat(buf.getShort());
+                }
+            } else {
+                buf.asFloatBuffer().get(row);
+                buf.position(buf.position() + dim * 4);
+            }
+        }
+        return out;
+    }
+
+    private static float[][] to2DFloat(JsonNode raw) {
         float[][] out = new float[raw.size()][];
         for (int i = 0; i < raw.size(); i++) {
-            List<Double> row = raw.get(i);
+            JsonNode row = raw.get(i);
             float[] arr = new float[row.size()];
             for (int j = 0; j < row.size(); j++) {
-                arr[j] = row.get(j).floatValue();
+                arr[j] = (float) row.get(j).doubleValue();
             }
             out[i] = arr;
         }
@@ -278,7 +382,8 @@ public class ColPaliClient {
 
     // ---- DTOs (wire shapes) -------------------------------------------------
 
-    record EmbedPagesRequest(List<PageItem> pages, boolean include_original, boolean include_pooled) {
+    record EmbedPagesRequest(List<PageItem> pages, boolean include_original, boolean include_pooled,
+                             String encoding) {
         record PageItem(String page_id, String image_b64) {
         }
     }
@@ -290,9 +395,11 @@ public class ColPaliClient {
         @JsonIgnoreProperties(ignoreUnknown = true)
         static class PageEmbeddingDto {
             public String page_id;
-            public List<List<Double>> original;
-            public List<List<Double>> pooled_rows;
-            public List<List<Double>> pooled_cols;
+            public JsonNode original;
+            public JsonNode pooled_rows;
+            public JsonNode pooled_cols;
+            public Integer dim;        // present with base64 encodings
+            public String encoding;    // echoed by the sidecar for base64 encodings
         }
     }
 
@@ -301,7 +408,7 @@ public class ColPaliClient {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     static class EmbedQueryResponse {
-        public List<List<Double>> vectors;
+        public JsonNode vectors;
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

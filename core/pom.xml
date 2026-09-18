@@ -30,6 +30,38 @@
             <version>${quarkus-mcp-server.version}</version>
         </dependency>
 
+        <!-- Official Qdrant gRPC client: used for the multivector page upserts
+             (packed float32 over HTTP/2 on port 6334, no JSON to build or
+             parse). Everything else stays on the REST client in QdrantClient.
+             Version tracks the server (1.13.x). -->
+        <dependency>
+            <groupId>io.qdrant</groupId>
+            <artifactId>client</artifactId>
+            <version>1.13.0</version>
+        </dependency>
+        <!-- The client declares these runtime-only; our upserter builds
+             protobuf messages directly, so they must be on the compile
+             classpath. Versions managed by the Quarkus BOM. -->
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-protobuf</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-stub</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-netty-shaded</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.apache.tika</groupId>
             <artifactId>tika-core</artifactId>
@@ -49,6 +81,15 @@
                     <artifactId>logback-classic</artifactId>
                 </exclusion>
             </exclusions>
+        </dependency>
+        <!-- ImageIO SPI plugin so PDFBox can decode JPEG2000 (JPX) images when
+             rasterizing pages. Tika already pulls in jai-imageio-core and the
+             JBIG2 reader; the JPEG2000 reader is packaged separately (JJ2000
+             license keeps it out of Apache distributions). Without it,
+             PageRasterizer throws MissingImageReaderException on such PDFs. -->
+        <dependency>
+            <groupId>com.github.jai-imageio</groupId>
+            <artifactId>jai-imageio-jpeg2000</artifactId>
         </dependency>
 
         <dependency>

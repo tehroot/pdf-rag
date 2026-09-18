@@ -8,6 +8,16 @@
 > [architecture.md](architecture.md); sidecar specifics are in
 > [components/colpali-sidecar.md](components/colpali-sidecar.md). This doc itself
 > still needs a refresh pass to integrate the visual side into every section.
+> Two overlays layer on the base file: `docker-compose.gpu.yml` (CUDA
+> sidecar, llama-server on the GPU; auto-loaded through the committed
+> `docker-compose.override.yml` symlink) and `docker-compose.pool.yml` (nginx
+> balancer in front of several sidecars). See
+> [Compose overlays: GPU and sidecar pool](#compose-overlays-gpu-and-sidecar-pool).
+>
+> **For the fastest path, use the [`scripts/`](../scripts/README.md) wrappers**
+> (`scripts/bootstrap.sh` then `scripts/up.sh [--gpu]`) — they handle `.env`, the
+> embedding-model download, the GPU overlay, and health checks. Current
+> project state lives in [status.md](status.md).
 
 How to build, configure, and run pdf-rag-ingest with the Qdrant backend (the
 default) and optionally the Open WebUI backend. There are two runnable artifacts
@@ -20,7 +30,7 @@ same tools and read the same env vars.
 |------|-----|------|
 | JDK 21+ | Compiles to Java 21 bytecode. | Newer JDKs work; we target `--release 21`. |
 | Maven 3.9.x | Quarkus 3.33 wants ≥ 3.9.6. | The repo uses `mvnvm` (auto-pins 3.9.9). Any installed `mvn` ≥ 3.9.6 works too. |
-| **Qdrant** (Qdrant backend) | Vector store. | Local Docker is fine; **pin to `qdrant/qdrant:v1.13.x`** for the multivector + multistage query API we use. |
+| **Qdrant** (Qdrant backend) | Vector store. | Local Docker is fine; **pin to `qdrant/qdrant:v1.13.x`** for the multivector + multistage query API we use. Both ports are needed: REST 6333 for everything, gRPC 6334 for the `<kb>_pages` upserts (`ingest.qdrant.upsert-transport=grpc`, the default; a gRPC failure logs a warning and falls back to REST for that batch). |
 | **Embeddings endpoint** (Qdrant backend) | OpenAI-compatible `/v1/embeddings`. | llama.cpp's `llama-server` (started with `--embeddings`) is the project default. vLLM / OpenAI / Together / LM Studio also work over the same OpenAI shape. |
 | **ColPali sidecar** (Qdrant backend, optional but default-on) | Visual-side embeddings. | Python service in `sidecar/`. CPU image with ColSmolVLM or GPU image with ColQwen2. See `sidecar/README.md` and `components/colpali-sidecar.md`. |
 | **Open WebUI** (legacy backend, optional) | If you still want the Open WebUI target. | 0.9.x; URL in `OPEN_WEBUI_BASE_URL`. |
@@ -30,8 +40,8 @@ same tools and read the same env vars.
 The cheapest setup that exercises the full default pipeline:
 
 ```bash
-# Qdrant
-docker run -p 6333:6333 -v qdrant-data:/qdrant/storage qdrant/qdrant:latest
+# Qdrant (6333 REST, 6334 gRPC for the page multivector upserts)
+docker run -p 6333:6333 -p 6334:6334 -v qdrant-data:/qdrant/storage qdrant/qdrant:v1.13.4
 
 # llama-server with an embedding GGUF. The --embeddings flag is required so
 # that /v1/embeddings is wired up. --port 8081 avoids the conflict with our
@@ -45,10 +55,10 @@ docker run -p 8081:8081 \
   --port 8081
 ```
 
-If you have a GPU, add `--gpus all` and use the `:server-cuda` image. If you
-prefer a different backend, anything that speaks OpenAI-compatible
-`/v1/embeddings` works — vLLM (`vllm/vllm-openai:latest --task embedding`),
-[LM Studio's server mode](https://lmstudio.ai), or vanilla OpenAI. Just point
+If you have a GPU, add `--gpus all` and use the `:server-cuda` image. Anything
+that speaks OpenAI-compatible `/v1/embeddings` works — vLLM
+(`vllm/vllm-openai:latest --task embedding`),
+[LM Studio's server mode](https://lmstudio.ai), or vanilla OpenAI — point
 `EMBED_BASE_URL` at it.
 
 ## Build
@@ -108,6 +118,7 @@ file can be overridden by the matching uppercased `_`-separated env var.
 |---------|----------|---------|---------|
 | `PORT` | no | `8080` | Listen port. |
 | `MCP_CORS_ORIGINS` | no | `*` | CORS allow-list. Restrict for production. |
+| `SWAGGER_UI_ALWAYS_INCLUDE` | no | `true` | **Build-time.** Serve Swagger UI (`/q/swagger-ui`) on the packaged app, not just dev mode. The `/q/openapi` schema is served regardless. Set `false` at build to keep the UI dev-only. |
 
 ## Run
 
@@ -125,8 +136,8 @@ export EMBED_MODEL=bge-large-en-v1.5
 java -jar server-stdio/target/quarkus-app/quarkus-run.jar
 ```
 
-If you run this in a terminal it sits there waiting for input — that's correct.
-See [mcp-integration.md](mcp-integration.md) for client wiring.
+Run in a terminal, it sits waiting for input — that's correct. See
+[mcp-integration.md](mcp-integration.md) for client wiring.
 
 ### Streamable HTTP transport — long-lived service at `:PORT/mcp`
 
@@ -137,6 +148,20 @@ export EMBED_MODEL=bge-large-en-v1.5
 java -jar server-http/target/quarkus-app/quarkus-run.jar
 # now listens on 0.0.0.0:8080, MCP endpoint at http://localhost:8080/mcp
 ```
+
+Alongside `/mcp`, the HTTP transport serves a plain **REST surface** for
+bulk/operational use — `POST /ingest/directory`, `GET /ingest/status/{jobId}`,
+`DELETE /ingest/document` (see [components/directory-ingest.md](components/directory-ingest.md))
+— and its **OpenAPI docs**, all on the same port:
+
+- Swagger UI: `http://localhost:8080/q/swagger-ui`
+- OpenAPI schema: `http://localhost:8080/q/openapi` (append `?format=json` for JSON)
+
+Swagger UI is enabled on the built server via `SWAGGER_UI_ALWAYS_INCLUDE=true`
+(build-time). Because `MCP_CORS_ORIGINS` defaults to `*`, an always-on UI is
+reachable by anything that can reach the port — restrict at the network layer, or
+rebuild with the flag `false` to keep the UI dev-only (the raw `/q/openapi` schema
+stays available either way).
 
 Live-reload during development:
 
@@ -242,6 +267,105 @@ volumes:
   qdrant_data:
 ```
 
+### Compose overlays: GPU and sidecar pool
+
+The checked-in stack is three files, layered in this order:
+
+| File | Adds |
+|------|------|
+| `docker-compose.yml` | The base stack: qdrant, llama-server (CPU image), colpali-server (CPU build), pdf-rag-http. |
+| `docker-compose.gpu.yml` | CUDA sidecar build + NVIDIA reservation; `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` on the sidecar so its allocator hands VRAM back; llama-server on `ghcr.io/ggml-org/llama.cpp:server-cuda` with `--n-gpu-layers ${LLAMA_GPU_LAYERS:-99}` (the full `command` is repeated because compose replaces a scalar); `INGEST_QUEUE_WORKERS` 2, `COLPALI_BATCH_SIZE` 16, `INGEST_QDRANT_MULTIVECTOR_UPSERT_BATCH` 4 as defaults for pdf-rag-http. Auto-loaded by plain `docker compose` through the committed `docker-compose.override.yml` symlink. |
+| `docker-compose.pool.yml` | `colpali-lb`: `nginx:1.27-alpine`, least-connections balancer on port 8090 in front of the local sidecar and remote replicas; pdf-rag-http gets `COLPALI_SIDECAR_URL=http://colpali-lb:8090` and depends on `colpali-lb` being healthy. |
+
+The pool is not auto-loaded. Bring it up by naming all three files:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.pool.yml up -d
+```
+
+**Always pass `--no-deps` when you recreate one service during a run.**
+The sidecar's `/embed_pages` blocks its event loop for the whole batch, so
+its Docker health probe can report `unhealthy` while it is busy; compose
+then refuses to start dependents and leaves `pdf-rag-http` stopped (seen
+2026-09-17, 5 min outage). The base file already sets the probe `timeout`
+to 40 s and `retries` to 5, which covers a batch, but do not depend on it:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.pool.yml \
+  up -d --no-deps --force-recreate colpali-server      # or llama-server, pdf-rag-http, colpali-lb
+```
+
+**Balancer config.** Upstreams live in `deploy/colpali-lb.conf`. The
+`./deploy` directory (not the file) is bind-mounted at `/etc/nginx/deploy`
+and nginx is started with `-c /etc/nginx/deploy/colpali-lb.conf`: a
+single-file bind mount pins the inode, and `git pull` writes a new file, so
+a reload would keep the old config. After editing or pulling the conf:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.pool.yml \
+  exec colpali-lb nginx -s reload
+```
+
+Do not reload casually during a run: old nginx workers close idle
+keep-alive connections the JDK client still holds. The client retries an
+embed POST once on I/O error, then requeues the job as transient, so the
+cost is re-work rather than lost jobs. The conf has no `max_conns` on the
+embed pool (nginx OSS answers 502 "no live upstreams" instead of queueing;
+pdf-rag-http treats 502/503/504 as transient, but requests queue better at
+the sidecars), `keepalive_timeout 3600s`, and a `/healthz` that reports
+ready when every replica is mid-batch.
+
+**Remote replicas.** `deploy/bigdumb-sidecar-compose.yml` is the layout on
+a second GPU host (two cards, four replicas per card, ports 8100-8103 and
+8110-8113, compose profile `pool`). Replicas run the same image and model
+cache with the same `COLPALI_*` env as the local sidecar, so vectors match;
+add or remove `server` lines in `deploy/colpali-lb.conf` to size the pool.
+Measured rates, the cross-GPU-generation parity caveat, and the incident
+list are in [plans/sidecar-pool-v1.md](plans/sidecar-pool-v1.md); the
+byte-level data path is in
+[components/visual-dataflow.md](components/visual-dataflow.md).
+
+### JVM heap for pdf-rag-http
+
+`docker-compose.yml` passes `JAVA_TOOL_OPTIONS: ${PDF_RAG_JAVA_TOOL_OPTIONS:-}`
+into `pdf-rag-http`. Empty means the JDK ergonomic default (25% of host
+RAM). Each queue worker holds a batch response, its decoded arrays, and a
+document's accumulated page vectors, so size the heap for the worker count,
+e.g. `PDF_RAG_JAVA_TOOL_OPTIONS=-Xmx64g` in `.env` (documented in
+`.env.example`). The same variable
+carries system properties for keys with no env alias, e.g.
+`-Dingest.qdrant.upsert-transport=rest`.
+
+### The `/documents` upload store mount (write-side exposure)
+
+The checked-in `docker-compose.yml` mounts a third big-storage location beside
+`QDRANT_DATA_DIR` and `PAGE_IMAGES_DIR`: `${INGEST_DOCUMENTS_DIR:-documents}`
+at `/documents`, **read-write** — the durable document store behind
+`POST /ingest/upload` (see
+[components/upload-ingest.md](components/upload-ingest.md)). Unlike `/docs`
+and `/host` (both read-only), this is the corpus of record: uploaded files
+stay until an operator deletes them, queued visual jobs re-read them, and
+`POST /ingest/directory` over `/documents/<kb>` re-indexes them.
+
+On a ZFS host, give it its own dataset with a quota so a fill cannot starve
+the Qdrant storage on the same pool:
+
+```bash
+zfs create -o recordsize=1M -o compression=lz4 -o quota=200G tank/documents
+# .env: INGEST_DOCUMENTS_DIR=/tank/documents
+```
+
+`recordsize=1M` suits whole-file PDF reads; `lz4` is close to free. The quota
+is not a suggestion: the REST surface has **no auth** and CORS defaults to
+`*`, and this endpoint is the first that *writes* caller-controlled bytes to
+permanent server storage — anyone who reaches `:8080` can consume pool
+capacity. Path confinement, per-request caps, and the free-space reserve are
+v1 mitigations; the real mitigation is network isolation. The container runs
+as root, so stored files are `root:root` on the tank (set `user:` on the
+service to change that). `ingest.upload.require_mount=true` (default) makes
+the server refuse uploads when `/documents` is not actually a mount — a
+missing bind would otherwise silently store the corpus inside the container.
+
 ### systemd unit for the HTTP transport
 
 ```ini
@@ -269,8 +393,20 @@ WantedBy=multi-user.target
 
 ## Health & observability
 
-- **Liveness/readiness**: not currently exposed. The HTTP transport returns 200
-  on its MCP endpoint once Quarkus is up; treat that as readiness.
+- **Liveness/readiness**: not currently exposed as a dedicated health endpoint.
+  The HTTP transport returns 200 on its MCP endpoint once Quarkus is up, and
+  `GET /q/openapi` → 200 is another cheap "HTTP/REST layer is up" probe; treat
+  either as readiness.
+- **Sidecar readiness**: `GET /healthz` on the sidecar returns
+  `{status, ready}`; the compose healthcheck exits 0 only on `ready:true`
+  (timeout 40 s, 5 retries, `start_period` 15 m for the first model
+  download). Through the balancer, `/healthz` proxies to any replica with a
+  1 s timeout and answers `{"ready":true,"note":"pool busy; ..."}` when none
+  answers in time. `GET /info` lists `encodings`.
+- **Balancer access log**: `deploy/colpali-lb.conf` logs one line per
+  embed request to stdout (nginx status, upstream status, timings, replica);
+  probes are silent. `docker compose ... logs colpali-lb` matches a job
+  failure on the Java side to what nginx saw.
 - **Logs**: stdio routes everything to stderr; HTTP logs to stdout. Set
   `QUARKUS_LOG_LEVEL=DEBUG` for verbose troubleshooting.
 - **Wire-level tracing**: no built-in HTTP logging interceptor. If you need to
@@ -304,3 +440,9 @@ WantedBy=multi-user.target
 | Qdrant 401 / 403 on every call | `QDRANT_API_KEY` empty against a Qdrant Cloud cluster. | Set the env var; we send it as the `api-key` header (Qdrant's convention). |
 | `POST /knowledge/{id}/file/add` → 400 `content provided is empty` | Open WebUI polling logic removed/shortened. | Restore `waitUntilProcessed`; ensure it sees `completed` before attach. |
 | stdio client connects but tool calls hang | Something is writing to stdout from `core` — log, `println`, or banner. | Audit recent changes; the stdio `application.properties` must keep `quarkus.banner.enabled=false` and `quarkus.log.console.stderr=true`. |
+| Log: `gRPC upsert into '<kb>_pages' failed (...); falling back to REST for this batch` on every batch | Port 6334 not reachable from pdf-rag-http, or `ingest.qdrant.grpc-host` points at the wrong host. | Expose 6334 on Qdrant; set `-Dingest.qdrant.grpc-host=<host>` via `PDF_RAG_JAVA_TOOL_OPTIONS`, or `-Dingest.qdrant.upsert-transport=rest` to stop the attempts. Jobs still succeed over REST, slower. |
+| pdf-rag-http refuses to start; SmallRye Config reports a property as missing | A `@ConfigProperty` with an empty `defaultValue` (SmallRye treats it as no value). Crash-looped the R530 for 9 min on 2026-09-18. | Give the key a sentinel default in code (`auto` for `ingest.qdrant.grpc-host`) or pass the value through `PDF_RAG_JAVA_TOOL_OPTIONS`. Tag the running image before a risky deploy so a revert can land. |
+| Visual jobs requeue in a loop with `ColPali sidecar ... returned HTTP 502` | Balancer has no live upstream: every replica down, or mid-batch with `max_conns` set. | Check replicas; keep `max_conns` off the embed pool. 502/503/504 are transient (requeue + backoff), not job failures. |
+| `IOException: Java heap space` on embed reads | Too many queue workers for the JVM heap. | Set `PDF_RAG_JAVA_TOOL_OPTIONS=-Xmx<n>g`, or lower `INGEST_QUEUE_WORKERS`. `ingest.colpali.wire-encoding=f32b64` (default) already cuts the response to a fraction of the JSON size. |
+| Scanned PDF ingest fails with `PDFBox extracted no text` | Text-only ingest (`enable_visual_index=false`) or a non-PDF with no text. | With a visual index requested the ingest proceeds with 0 chunks; enable the visual index for scanned corpora. |
+| Stack restart left `pdf-rag-http` stopped | A busy sidecar failed its health probe; compose refused to start dependents. | Recreate with `--no-deps`; the base file's 40 s probe timeout covers a batch. |

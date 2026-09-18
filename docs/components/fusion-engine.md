@@ -17,12 +17,10 @@ visual-side retrieval into a single ranked result with confidence labels:
 The text pipeline (`ChunkPipeline`) and visual pipeline (`ColPaliPipeline`)
 each produce a ranked list independently. `FusionEngine` combines them into a
 single ranked list of `SearchHit`s, with per-hit `pageScore` populated from the
-matching page (if any) and per-hit + response-level `confidence` labels
-attached.
-
-It also handles the `retrieval_mode` resolution and fallback logic so the
-agent sees a consistent surface regardless of whether the KB has a visual
-index or whether the sidecar is up.
+matching page (if any) and per-hit + response-level `confidence` labels. It
+also resolves `retrieval_mode` and applies fallback logic, so the agent sees a
+consistent surface whether or not the KB has a visual index or the sidecar is
+up.
 
 ## The fallback matrix
 
@@ -41,7 +39,7 @@ index or whether the sidecar is up.
 
 Sidecar-down handling differs by stage:
 
-- **At query time** (here): a `IngestException` from `ColPaliClient` triggers
+- **At query time** (here): an `IngestException` from `ColPaliClient` triggers
   soft-degrade to `text_only_fallback` with a warning. The agent gets useful
   results even if the sidecar bounced.
 - **At ingest time** (`QdrantBackend.ingest`): hard-fail. The user explicitly
@@ -281,9 +279,9 @@ Per-call overrides on `search_documents`:
 - **Pluggable strategies.** Production retrieval research is active; RRF is
   the proven default but weighted-score and learned-reranker variants exist.
   The `FusionStrategy` interface lets us swap or A/B without rewiring.
-- **Heuristic confidence over a learned model.** A learned confidence model
-  would need training data we don't have for v1. The weighted heuristic is
-  easy to reason about and the weights are config-tunable.
+- **Heuristic confidence over a learned model.** A learned model needs
+  training data we don't have for v1; the weighted heuristic is easy to
+  reason about and config-tunable.
 - **Soft-degrade on query, hard-fail on ingest.** Queries should be best-effort
   — a busted sidecar shouldn't blackout retrieval. Ingest is committing data
   that downstream queries assume exists; we don't want to half-commit.

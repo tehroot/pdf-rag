@@ -38,6 +38,8 @@ import java.util.Set;
 @ApplicationScoped
 public class QdrantClient {
 
+    private static final org.jboss.logging.Logger LOG = org.jboss.logging.Logger.getLogger(QdrantClient.class);
+
     @ConfigProperty(name = "ingest.qdrant.url")
     String baseUrl;
 
@@ -49,6 +51,17 @@ public class QdrantClient {
 
     @ConfigProperty(name = "ingest.qdrant.connect-timeout-seconds", defaultValue = "10")
     long connectTimeoutSeconds;
+
+    /**
+     * Transport for the multivector page upserts: {@code grpc} (packed
+     * float32 on port 6334, see {@link QdrantGrpcUpserter}) or {@code rest}
+     * (JSON on the base URL). Everything else is always REST.
+     */
+    @ConfigProperty(name = "ingest.qdrant.upsert-transport", defaultValue = "grpc")
+    String upsertTransport;
+
+    @Inject
+    QdrantGrpcUpserter grpcUpserter;
 
     @ConfigProperty(name = "ingest.qdrant.request-timeout-seconds", defaultValue = "120")
     long requestTimeoutSeconds;
@@ -114,6 +127,69 @@ public class QdrantClient {
         }
     }
 
+    /**
+     * Delete every point in {@code collection} whose {@code doc_id} payload
+     * equals {@code docId}. Returns true if the collection existed (delete
+     * issued), false on 404 (nothing to do). {@code doc_id} is payload-indexed,
+     * so this is a fast filtered delete — used for replace-on-reingest and
+     * explicit document deletion.
+     */
+    public boolean deleteByDocId(String collection, String docId) {
+        Map<String, Object> body = Map.of("filter", toQdrantFilter(Map.of("doc_id", docId)));
+        HttpRequest req = builder("/collections/" + encode(collection) + "/points/delete?wait=true")
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(writeJson(body)))
+                .build();
+        HttpResponse<byte[]> resp = sendRaw(req);
+        if (resp.statusCode() == 404) {
+            return false;
+        }
+        if (resp.statusCode() / 100 != 2) {
+            throw new IngestException("Qdrant POST /collections/" + collection
+                    + "/points/delete returned HTTP " + resp.statusCode() + ": "
+                    + new String(resp.body(), StandardCharsets.UTF_8));
+        }
+        return true;
+    }
+
+    /**
+     * Count distinct {@code doc_id} values in {@code collection} via the facet
+     * API ({@code doc_id} is payload-indexed on every KB collection, which
+     * facet requires). Returns null on 404 (collection doesn't exist).
+     * Accurate up to {@link #DOC_COUNT_FACET_LIMIT} distinct documents; a KB
+     * larger than that reports the limit (saturated, not wrong-by-much —
+     * revisit with a scroll-based count if KBs ever get that big).
+     */
+    public Long countDocuments(String collection) {
+        Map<String, Object> body = Map.of(
+                "key", "doc_id",
+                "limit", DOC_COUNT_FACET_LIMIT,
+                "exact", true);
+        // NOTE: facet lives at /collections/{name}/facet — NOT under /points
+        // like search/delete/query (verified against a live v1.13.4).
+        HttpRequest req = builder("/collections/" + encode(collection) + "/facet")
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(writeJson(body)))
+                .build();
+        HttpResponse<byte[]> resp = sendRaw(req);
+        if (resp.statusCode() == 404) {
+            return null;
+        }
+        if (resp.statusCode() / 100 != 2) {
+            throw new IngestException("Qdrant POST /collections/" + collection
+                    + "/facet returned HTTP " + resp.statusCode() + ": "
+                    + new String(resp.body(), StandardCharsets.UTF_8));
+        }
+        FacetResponse parsed = readJson(resp.body(), new TypeReference<FacetResponse>() {
+        });
+        if (parsed == null || parsed.result == null || parsed.result.hits == null) {
+            return 0L;
+        }
+        return (long) parsed.result.hits.size();
+    }
+
+    private static final int DOC_COUNT_FACET_LIMIT = 10_000;
+
     public void createCollection(String name, int dim) {
         Map<String, Object> vectors = Map.of("size", dim, "distance", distance);
         Map<String, Object> body = Map.of("vectors", vectors);
@@ -168,8 +244,18 @@ public class QdrantClient {
     public void ensureCollection(String name, int dim) {
         CollectionInfo existing = getCollection(name);
         if (existing == null) {
-            createCollection(name, dim);
-            return;
+            try {
+                createCollection(name, dim);
+                return;
+            } catch (IngestException e) {
+                // Concurrent ingests race here: both GET null, both PUT create,
+                // the loser gets a conflict. If the collection now exists, fall
+                // through to the dim check below instead of failing the ingest.
+                existing = getCollection(name);
+                if (existing == null) {
+                    throw e;
+                }
+            }
         }
         Integer existingDim = existing.dim();
         if (existingDim != null && existingDim != dim) {
@@ -195,18 +281,27 @@ public class QdrantClient {
      * @param binaryQuantize when true, adds {@code quantization_config.binary} with
      *                       {@code always_ram=true}; recovers most of the storage cost
      *                       of keeping the full-resolution vectors around
+     * @param onDisk         when true, sets {@code on_disk=true} — vectors are served
+     *                       from mmap'd files (page-cache warm) instead of mandatory
+     *                       RAM residency. Essential for the full-resolution vectors:
+     *                       they're rerank-only, and at ~1.6 MB/page a mid-size corpus
+     *                       otherwise demands tens of GB of RAM
      */
     public record MultiVectorConfig(int size, String distance, String comparator,
-                                     boolean hnswEnabled, boolean binaryQuantize) {
+                                     boolean hnswEnabled, boolean binaryQuantize,
+                                     boolean onDisk) {
 
-        /** Pooled-vector preset: ANN-indexed, no quantization. */
+        /** Pooled-vector preset: ANN-indexed, no quantization, RAM-resident
+         *  (small, and the prefetch stage is latency-critical). */
         public static MultiVectorConfig pooled(int size) {
-            return new MultiVectorConfig(size, "Cosine", "max_sim", true, false);
+            return new MultiVectorConfig(size, "Cosine", "max_sim", true, false, false);
         }
 
-        /** Original-vector preset: HNSW disabled, binary quantization on. */
+        /** Original-vector preset: HNSW disabled, binary quantization on
+         *  (codes {@code always_ram}), full vectors on disk — the standard
+         *  late-interaction layout: prefetch from RAM, rerank from mmap. */
         public static MultiVectorConfig originalRerankOnly(int size) {
-            return new MultiVectorConfig(size, "Cosine", "max_sim", false, true);
+            return new MultiVectorConfig(size, "Cosine", "max_sim", false, true, true);
         }
     }
 
@@ -240,8 +335,18 @@ public class QdrantClient {
     public void ensureMultivectorCollection(String name, Map<String, MultiVectorConfig> namedVectors) {
         CollectionInfo existing = getCollection(name);
         if (existing == null) {
-            createMultivectorCollection(name, namedVectors);
-            return;
+            try {
+                createMultivectorCollection(name, namedVectors);
+                return;
+            } catch (IngestException e) {
+                // Same create race as ensureCollection: concurrent visual
+                // workers / parallel directory ingests can both attempt the
+                // create. If it exists now, fall through to the shape check.
+                existing = getCollection(name);
+                if (existing == null) {
+                    throw e;
+                }
+            }
         }
         if (existing.dim() != null) {
             throw new IngestException("Collection '" + name + "' is configured as a single-vector "
@@ -265,6 +370,9 @@ public class QdrantClient {
         if (cfg.binaryQuantize()) {
             m.put("quantization_config",
                     Map.of("binary", Map.of("always_ram", true)));
+        }
+        if (cfg.onDisk()) {
+            m.put("on_disk", true);
         }
         return m;
     }
@@ -298,6 +406,18 @@ public class QdrantClient {
     public void upsertMultivectorPoints(String collection, List<MultiVectorPoint> points) {
         if (points.isEmpty()) {
             return;
+        }
+        if ("grpc".equalsIgnoreCase(upsertTransport) && grpcUpserter != null) {
+            try {
+                grpcUpserter.upsert(collection, points);
+                return;
+            } catch (IngestException e) {
+                // A transport problem must not fail the job: the REST path
+                // below writes the same points. Logged so a broken gRPC
+                // setup is visible rather than silently slow.
+                LOG.warnf("gRPC upsert into '%s' failed (%s); falling back to REST for this batch",
+                        collection, e.getMessage());
+            }
         }
         List<Map<String, Object>> rendered = new ArrayList<>(points.size());
         for (MultiVectorPoint p : points) {
@@ -561,6 +681,22 @@ public class QdrantClient {
     @JsonIgnoreProperties(ignoreUnknown = true)
     static class CollectionsList {
         public List<CollectionSummary> collections;
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    static class FacetResponse {
+        public FacetResult result;
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    static class FacetResult {
+        public List<FacetHit> hits;
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    static class FacetHit {
+        public Object value;
+        public long count;
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

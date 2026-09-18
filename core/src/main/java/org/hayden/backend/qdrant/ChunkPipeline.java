@@ -203,12 +203,48 @@ public class ChunkPipeline {
         return new SearchResponse(BACKEND_NAME, req.kbName(), hits);
     }
 
+    /**
+     * Delete a document's chunks from the {@code <kb>} collection. Returns true
+     * if the collection existed (delete issued). Idempotent — a docId with no
+     * points is a no-op.
+     */
+    public boolean deleteDoc(String kbName, String docId) {
+        if (kbName == null || kbName.isBlank() || docId == null || docId.isBlank()) {
+            return false;
+        }
+        return qdrant.deleteByDocId(kbName, docId);
+    }
+
     /** True if the chunks collection for {@code kbName} already exists. */
     public boolean collectionExists(String kbName) {
         if (kbName == null || kbName.isBlank()) {
             return false;
         }
         return qdrant.getCollection(kbName) != null;
+    }
+
+    /**
+     * Drop the KB's chunk collection entirely (KB deletion). Returns true if
+     * it existed. The visual-side counterpart is
+     * {@link ColPaliPipeline#dropVisualIndex}.
+     */
+    public boolean dropCollection(String kbName) {
+        if (!collectionExists(kbName)) {
+            return false;
+        }
+        qdrant.deleteCollection(kbName);
+        return true;
+    }
+
+    /**
+     * Distinct document count in the KB's chunk collection (facet on the
+     * payload-indexed {@code doc_id}), or null if the collection doesn't exist.
+     */
+    public Long countDocuments(String kbName) {
+        if (kbName == null || kbName.isBlank()) {
+            return null;
+        }
+        return qdrant.countDocuments(kbName);
     }
 
     public List<KnowledgeBaseSummary> listKbCollections() {
@@ -221,7 +257,11 @@ public class ChunkPipeline {
                 continue;
             }
             QdrantClient.CollectionInfo info = qdrant.getCollection(cs.name());
-            Long vectors = info == null ? null : info.vectors_count;
+            // points_count, not vectors_count: Qdrant 1.10+ returns
+            // vectors_count as null (lazily computed, deprecated), which
+            // parses to 0 and reports every KB as empty. Chunk collections
+            // are single-vector, so points == chunks == vectors.
+            Long vectors = info == null ? null : info.points_count;
             Integer dim = info == null ? null : info.dim();
             out.add(new KnowledgeBaseSummary(BACKEND_NAME, cs.name(), cs.name(), vectors, dim));
         }

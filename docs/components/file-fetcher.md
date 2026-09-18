@@ -50,10 +50,8 @@ Config (env overrides shown):
 ### `fromUrl(url, overrideFilename)`
 
 1. Parse the string into a `URI`. Throws `IngestException` on garbage.
-2. Reject anything other than `http` / `https`. The most likely abuse vector
-   here is `file://` — explicitly disallowed so a misbehaving agent can't read
-   the host filesystem through this path. Use `fromPath` if you actually want a
-   local file (and pass an absolute path).
+2. Reject anything other than `http` / `https`. `file://` is explicitly
+   disallowed — see "Why it's like this"; use `fromPath` for local files.
 3. Build an `HttpRequest` with `Duration.ofSeconds(requestTimeoutSeconds)`.
 4. Send with `HttpResponse.BodyHandlers.ofByteArray()`.
 5. Reject non-2xx.
@@ -99,11 +97,10 @@ Static table (lowercased extension → MIME):
 | `pptx` | `application/vnd.openxmlformats-officedocument.presentationml.presentation` |
 | anything else | `application/octet-stream` |
 
-This table is intentionally short — Tika does proper sniffing downstream, and
-the content-type we record is mostly a hint (Tika's `AutoDetectParser` reads
-magic bytes regardless). For Open WebUI uploads it's used to set the
-multipart-part `Content-Type` header; some Open WebUI versions look at the
-declared MIME to pick a parser, so the table covers the formats people
+The table is intentionally short — Tika's `AutoDetectParser` reads magic
+bytes downstream regardless, so this is mostly a hint. For Open WebUI uploads
+it sets the multipart-part `Content-Type` header; some Open WebUI versions
+pick a parser from the declared MIME, so the table covers the formats people
 actually ingest.
 
 ### `HttpClient` setup
@@ -150,10 +147,9 @@ half-ingested state to clean up.
   downstream consumers (Tika needs a re-readable input, multipart upload
   computes Content-Length). 100 MB cap keeps memory bounded; if you need huge
   files, the streaming refactor would start here.
-- **Hard-coded extension table over content-detection.** We have to ship the
-  bytes to Tika regardless, and Tika's own detection is far more reliable than
-  ours. The table just provides a reasonable hint for Open WebUI and a fallback
-  when the URL response has no `Content-Type`.
+- **Hard-coded extension table over content-detection.** Tika's own detection
+  downstream is far more reliable than ours would be; the table is a hint for
+  Open WebUI and a fallback when the URL response has no `Content-Type`.
 - **`file://` is rejected on purpose.** Don't add it back without thinking
   about the security implications — an agent that can pass `file:///etc/passwd`
   becomes a host filesystem reader. If you really want local files, use

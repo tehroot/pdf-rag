@@ -28,8 +28,8 @@ QdrantBackend.ingest
             ├──► PageRasterizer    (PDF → PNG bytes)
             ├──► TextLayerProbe    (page text_quality 0|1|2)
             ├──► PageImageStore    (PNG → filesystem)
-            ├──► ColPaliClient     (HTTP → Python sidecar)
-            └──► QdrantClient      (multivector upsert → <kb>_pages)
+            ├──► ColPaliClient     (HTTP → Python sidecar; base64 float32 vectors back)
+            └──► QdrantClient      (multivector upsert → <kb>_pages; gRPC by default, REST fallback)
 ```
 
 ## Interface
@@ -73,9 +73,8 @@ Injected dependencies:
 
 ### `isEnabledFor(kbName)` — the capability flag
 
-Implicit state pattern: no separate metadata store, no flag table. We check
-whether the `<kb>_pages` collection exists in Qdrant. If it does, visual is
-on for this KB; if not, it's off.
+Implicit state pattern: no separate metadata store, no flag table — visual
+is on for a KB iff the `<kb>_pages` collection exists in Qdrant.
 
 ```java
 return qdrant.getCollection(kbName + "_pages") != null;
@@ -106,6 +105,8 @@ for (RenderedPage page : rendered) {
 }
 
 // 4. Embed all pages via the sidecar (batched at ColPaliClient.batchSize).
+//    Each PageEmbedding carries float[][] original / pooledRows / pooledCols,
+//    already decoded from the wire encoding by the client.
 List<PageInput> sidecarInputs = ...;
 List<PageEmbedding> embeddings = sidecar.embedPages(sidecarInputs);
 int vectorDim = embeddings.get(0).original()[0].length;
@@ -129,7 +130,11 @@ for each rendered+embedded page:
     vectors = { original, pooled_rows, pooled_cols }
     pointId = UuidV5.forPage(docId, pageNumber)
 
-qdrant.upsertMultivectorPoints(kbName + "_pages", points);
+for each slice of ingest.qdrant.multivector-upsert-batch-size points:
+    qdrant.upsertMultivectorPoints(kbName + "_pages", slice);
+    // → QdrantGrpcUpserter (packed float32 over gRPC, wait=true) when
+    //   ingest.qdrant.upsert-transport=grpc (default); a gRPC failure is
+    //   logged and that slice is re-sent over REST. See qdrant-client.md.
 return PagesIngestResult(collection, docId, pageCount, vectorDim);
 ```
 
@@ -202,7 +207,8 @@ big-endian int32s) — no need to decode the full image.
 | Case | Result |
 |------|--------|
 | Non-PDF input to `ingestPages` | `IngestException` from `PageRasterizer`. |
-| Sidecar unreachable mid-ingest | `IngestException` from `ColPaliClient`. `QdrantBackend.ingest` translates this to a clear "sidecar unreachable" message. |
+| Sidecar unreachable mid-ingest | `SidecarUnavailableException` (an `IngestException`) from `ColPaliClient` after its one retry, or on a balancer 502/503/504. The queue worker requeues the job without a retry penalty; a synchronous caller sees the exception. (`QdrantBackend.ingest` also pre-flights `sidecarHealthy()` and hard-fails before any work.) |
+| Qdrant gRPC upsert fails | Logged by `QdrantClient`; the same batch is written over REST. Only a REST failure after that surfaces as `IngestException`. |
 | Embeddings count ≠ rendered page count | `IngestException` ("Sidecar returned N embeddings for M rendered pages"). |
 | Mismatched dim on existing collection | `IngestException` from `QdrantClient.ensureMultivectorCollection`. |
 | Image-store write fails (disk full, perms) | `IngestException` from `FilesystemPageImageStore`. |
@@ -216,9 +222,9 @@ big-endian int32s) — no need to decode the full image.
   the agent surface should be one logical KB, not two-keys-per-document.
   Making `ColPaliPipeline` a regular CDI bean injected into `QdrantBackend`
   lets the orchestrator decide when to call it.
-- **`<kb>_pages` suffix.** Implicit state pattern. The existence of the
-  collection IS the "is visual enabled?" signal — no separate metadata
-  required. Operationally observable via `GET /collections` against Qdrant.
+- **`<kb>_pages` suffix.** The collection's existence IS the "is visual
+  enabled?" signal — no separate metadata. Operationally observable via
+  `GET /collections` against Qdrant.
 - **Images stored outside Qdrant.** A 1000-page corpus at 150 DPI is ~200MB
   of PNG. Putting that in Qdrant payload would bloat the WAL and snapshots
   dramatically. The `PageImageStore` abstraction lets us swap filesystem for
@@ -252,7 +258,6 @@ big-endian int32s) — no need to decode the full image.
 - `inspectPage_missing_returnsNull`
 - `pagesCollectionName_appliesSuffix`
 
-The test setup is involved (real `PageRasterizer` + real `TextLayerProbe` +
-real `FilesystemPageImageStore` with a tmp dir + WireMock-backed sidecar +
-WireMock-backed Qdrant) because each plays a real role. But no live services
-required.
+The test setup is involved (real `PageRasterizer` + `TextLayerProbe` +
+`FilesystemPageImageStore` with a tmp dir + WireMock-backed sidecar and
+Qdrant) because each plays a real role; no live services required.

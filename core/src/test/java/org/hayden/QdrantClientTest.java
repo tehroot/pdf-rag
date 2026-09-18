@@ -18,6 +18,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.equalToJson;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
+import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.put;
 import static com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
@@ -69,19 +70,22 @@ class QdrantClientTest {
 
     @Test
     void getCollection_parsesDimAndCounts() {
+        // vectors_count is null on real 1.10+ Qdrant (deprecated); points_count
+        // is the reliable population metric. The null must parse without error.
         server.stubFor(get(urlEqualTo("/collections/docs"))
                 .willReturn(aResponse().withStatus(200)
                         .withBody("""
                                 {"result":{
                                   "points_count": 42,
-                                  "vectors_count": 42,
+                                  "vectors_count": null,
                                   "config":{"params":{"vectors":{"size":384,"distance":"Cosine"}}}
                                 }}""")));
 
         QdrantClient.CollectionInfo info = client.getCollection("docs");
         assertThat(info).isNotNull();
         assertThat(info.dim()).isEqualTo(384);
-        assertThat(info.vectors_count).isEqualTo(42);
+        assertThat(info.points_count).isEqualTo(42);
+        assertThat(info.vectors_count).isZero();   // null → 0 on the primitive field
     }
 
     @Test
@@ -162,6 +166,54 @@ class QdrantClientTest {
         assertThatThrownBy(() -> client.ensurePayloadIndexes("docs", Map.of("doc_id", "keyword")))
                 .isInstanceOf(IngestException.class)
                 .hasMessageContaining("HTTP 500");
+    }
+
+    @Test
+    void deleteByDocId_issuesFilteredDelete() {
+        server.stubFor(post(urlPathEqualTo("/collections/docs/points/delete"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":{}}")));
+
+        boolean existed = client.deleteByDocId("docs", "d-1");
+
+        assertThat(existed).isTrue();
+        server.verify(postRequestedFor(urlPathEqualTo("/collections/docs/points/delete"))
+                .withRequestBody(matchingJsonPath("$.filter.must[0].key", equalTo("doc_id")))
+                .withRequestBody(matchingJsonPath("$.filter.must[0].match.value", equalTo("d-1"))));
+    }
+
+    @Test
+    void deleteByDocId_returnsFalseOn404() {
+        server.stubFor(post(urlPathEqualTo("/collections/gone/points/delete"))
+                .willReturn(aResponse().withStatus(404)));
+
+        assertThat(client.deleteByDocId("gone", "d-1")).isFalse();
+    }
+
+    @Test
+    void countDocuments_facetsOnDocId_andCountsDistinctHits() {
+        server.stubFor(post(urlPathEqualTo("/collections/docs/facet"))
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":{"hits":[
+                          {"value":"doc-a","count":47},
+                          {"value":"doc-b","count":12},
+                          {"value":"doc-c","count":3}
+                        ]}}""")));
+
+        assertThat(client.countDocuments("docs")).isEqualTo(3L);
+        server.verify(postRequestedFor(urlPathEqualTo("/collections/docs/facet"))
+                .withRequestBody(matchingJsonPath("$.key", equalTo("doc_id")))
+                .withRequestBody(matchingJsonPath("$.exact", equalTo("true"))));
+    }
+
+    @Test
+    void countDocuments_returnsNullOn404_andZeroOnEmpty() {
+        server.stubFor(post(urlPathEqualTo("/collections/gone/facet"))
+                .willReturn(aResponse().withStatus(404)));
+        server.stubFor(post(urlPathEqualTo("/collections/empty/facet"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":{\"hits\":[]}}")));
+
+        assertThat(client.countDocuments("gone")).isNull();
+        assertThat(client.countDocuments("empty")).isZero();
     }
 
     @Test
@@ -251,11 +303,15 @@ class QdrantClientTest {
         assertThat(body).contains("\"pooled_cols\"");
         assertThat(body).contains("\"max_sim\"");
         assertThat(body).contains("\"size\":128");
-        // original is rerank-only → hnsw disabled and binary quantization on.
+        // original is rerank-only → hnsw disabled, binary quantization on,
+        // and full vectors on disk (mmap-served — RAM holds only the BQ codes).
         assertThat(body).contains("\"hnsw_config\":{\"m\":0}");
         assertThat(body).contains("\"quantization_config\"");
         assertThat(body).contains("\"binary\"");
         assertThat(body).contains("\"always_ram\":true");
+        assertThat(body).contains("\"on_disk\":true");
+        // pooled vectors stay RAM-resident: on_disk appears exactly once.
+        assertThat(body.split("\"on_disk\":true", -1)).hasSize(2);
     }
 
     @Test
@@ -268,6 +324,89 @@ class QdrantClientTest {
         client.ensureMultivectorCollection("pages",
                 Map.of("original", QdrantClient.MultiVectorConfig.originalRerankOnly(128),
                        "pooled_rows", QdrantClient.MultiVectorConfig.pooled(128)));
+
+        server.verify(putRequestedFor(urlEqualTo("/collections/pages")));
+    }
+
+    @Test
+    void ensureCollection_toleratesConcurrentCreateRace() {
+        // Two ingests race: both GET 404, both PUT create, the loser gets a
+        // conflict. The loser must re-GET and accept the winner's collection.
+        server.stubFor(get(urlEqualTo("/collections/docs"))
+                .inScenario("create-race")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(404).withBody("{}")));
+        server.stubFor(put(urlEqualTo("/collections/docs"))
+                .inScenario("create-race")
+                .willSetStateTo("created")
+                .willReturn(aResponse().withStatus(409)
+                        .withBody("{\"status\":{\"error\":\"already exists\"}}")));
+        server.stubFor(get(urlEqualTo("/collections/docs"))
+                .inScenario("create-race")
+                .whenScenarioStateIs("created")
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":{
+                          "config":{"params":{"vectors":{"size":384,"distance":"Cosine"}}}
+                        }}""")));
+
+        client.ensureCollection("docs", 384);   // must not throw
+
+        server.verify(putRequestedFor(urlEqualTo("/collections/docs")));
+    }
+
+    @Test
+    void ensureCollection_concurrentCreateRace_stillRejectsDimMismatch() {
+        // Same race, but the winner created the collection with a different
+        // dim — the loser must still surface the mismatch, not swallow it.
+        server.stubFor(get(urlEqualTo("/collections/docs"))
+                .inScenario("race-dim")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(404).withBody("{}")));
+        server.stubFor(put(urlEqualTo("/collections/docs"))
+                .inScenario("race-dim")
+                .willSetStateTo("created")
+                .willReturn(aResponse().withStatus(409)
+                        .withBody("{\"status\":{\"error\":\"already exists\"}}")));
+        server.stubFor(get(urlEqualTo("/collections/docs"))
+                .inScenario("race-dim")
+                .whenScenarioStateIs("created")
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":{
+                          "config":{"params":{"vectors":{"size":512,"distance":"Cosine"}}}
+                        }}""")));
+
+        assertThatThrownBy(() -> client.ensureCollection("docs", 384))
+                .isInstanceOf(IngestException.class)
+                .hasMessageContaining("dim=512");
+    }
+
+    @Test
+    void ensureMultivectorCollection_toleratesConcurrentCreateRace() {
+        // Same race on the <kb>_pages collection (two visual queue workers, or
+        // eager creation from parallel directory ingests).
+        server.stubFor(get(urlEqualTo("/collections/pages"))
+                .inScenario("mv-race")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(404).withBody("{}")));
+        server.stubFor(put(urlEqualTo("/collections/pages"))
+                .inScenario("mv-race")
+                .willSetStateTo("created")
+                .willReturn(aResponse().withStatus(409)
+                        .withBody("{\"status\":{\"error\":\"already exists\"}}")));
+        server.stubFor(get(urlEqualTo("/collections/pages"))
+                .inScenario("mv-race")
+                .whenScenarioStateIs("created")
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":{
+                          "config":{"params":{"vectors":{
+                            "original":{"size":128},
+                            "pooled_rows":{"size":128}
+                          }}}
+                        }}""")));
+
+        client.ensureMultivectorCollection("pages",
+                Map.of("original", QdrantClient.MultiVectorConfig.originalRerankOnly(128),
+                       "pooled_rows", QdrantClient.MultiVectorConfig.pooled(128)));   // must not throw
 
         server.verify(putRequestedFor(urlEqualTo("/collections/pages")));
     }

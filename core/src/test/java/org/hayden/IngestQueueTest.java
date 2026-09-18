@@ -7,6 +7,7 @@ import org.hayden.ingest.IngestRequest.SourceType;
 import org.hayden.ingest.IngestResult;
 import org.hayden.jobs.IngestJob;
 import org.hayden.jobs.IngestQueue;
+import org.hayden.jobs.JobKind;
 import org.hayden.jobs.JobStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -114,6 +115,46 @@ class IngestQueueTest {
     }
 
     @Test
+    void requeueTransient_returnsToQueued_withoutRetryPenalty_andPersists() throws Exception {
+        IngestJob job = queue.submit(IngestJob.queuedVisual(sampleRequest("kb"), "doc-1"));
+        IngestJob taken = queue.take(100, TimeUnit.MILLISECONDS).orElseThrow();
+
+        queue.requeueTransient(job.jobId());
+
+        IngestJob requeued = queue.getJob(job.jobId()).orElseThrow();
+        assertThat(requeued.status()).isEqualTo(JobStatus.QUEUED);
+        assertThat(requeued.retryCount()).isEqualTo(taken.retryCount());
+        // Back in the pending line and takeable again.
+        IngestJob retaken = queue.take(100, TimeUnit.MILLISECONDS).orElseThrow();
+        assertThat(retaken.jobId()).isEqualTo(job.jobId());
+        assertThat(retaken.status()).isEqualTo(JobStatus.IN_PROGRESS);
+    }
+
+    @Test
+    void cancelPending_cancelsOnlyQueuedJobsForTheKb() throws Exception {
+        IngestJob inFlight = queue.submit(IngestJob.queuedVisual(sampleRequest("doomed-kb"), "d-0"));
+        IngestJob queued1 = queue.submit(IngestJob.queuedVisual(sampleRequest("doomed-kb"), "d-1"));
+        IngestJob queued2 = queue.submit(IngestJob.queuedVisual(sampleRequest("doomed-kb"), "d-2"));
+        IngestJob otherKb = queue.submit(IngestJob.queuedVisual(sampleRequest("other-kb"), "d-3"));
+        // take() drains FIFO: the first doomed-kb job is now IN_PROGRESS —
+        // a worker-claimed job must NOT be cancelled.
+        IngestJob taken = queue.take(100, TimeUnit.MILLISECONDS).orElseThrow();
+        assertThat(taken.jobId()).isEqualTo(inFlight.jobId());
+
+        int cancelled = queue.cancelPending("doomed-kb");
+
+        assertThat(cancelled).isEqualTo(2);
+        assertThat(queue.getJob(queued1.jobId()).orElseThrow().status()).isEqualTo(JobStatus.FAILED);
+        assertThat(queue.getJob(queued1.jobId()).orElseThrow().error()).contains("deleted");
+        assertThat(queue.getJob(queued2.jobId()).orElseThrow().status()).isEqualTo(JobStatus.FAILED);
+        assertThat(queue.getJob(inFlight.jobId()).orElseThrow().status()).isEqualTo(JobStatus.IN_PROGRESS);
+        assertThat(queue.getJob(otherKb.jobId()).orElseThrow().status()).isEqualTo(JobStatus.QUEUED);
+        // Only the other KB's job remains takeable.
+        IngestJob next = queue.take(100, TimeUnit.MILLISECONDS).orElseThrow();
+        assertThat(next.jobId()).isEqualTo(otherKb.jobId());
+    }
+
+    @Test
     void markFailed_transitionsAndAttachesError() throws Exception {
         IngestJob job = queue.submit(IngestJob.queued(sampleRequest("kb"), "doc-1"));
         queue.take(100, TimeUnit.MILLISECONDS);
@@ -214,7 +255,8 @@ class IngestQueueTest {
         IngestJob hot = queue.getJob(job.jobId()).orElseThrow();
         IngestJob bumped = new IngestJob(hot.jobId(), JobStatus.IN_PROGRESS,
                 hot.request(), hot.docId(), hot.submittedAt(), hot.startedAt(),
-                hot.completedAt(), hot.result(), hot.error(), hot.warnings(), 3);
+                hot.completedAt(), hot.result(), hot.error(), hot.warnings(), 3,
+                hot.kind());
         Files.write(tmpRoot.resolve(bumped.jobId() + ".json"),
                 jacksonMapper().writeValueAsBytes(bumped));
 
@@ -223,6 +265,40 @@ class IngestQueueTest {
         assertThat(recovered.status()).isEqualTo(JobStatus.FAILED);
         assertThat(recovered.error()).contains("retry cap (3)");
         assertThat(restarted.pendingCount()).isZero();
+    }
+
+    @Test
+    void listJobs_filtersByStatus_newestFirst() throws Exception {
+        IngestJob first = queue.submit(IngestJob.queued(sampleRequest("kb"), "doc-1"));
+        Thread.sleep(5);   // distinct submittedAt for a stable sort assertion
+        IngestJob second = queue.submit(IngestJob.queued(sampleRequest("kb"), "doc-2"));
+        queue.take(100, TimeUnit.MILLISECONDS);   // first → IN_PROGRESS (FIFO)
+
+        List<IngestJob> queuedOnly = queue.listJobs(JobStatus.QUEUED);
+        assertThat(queuedOnly).extracting(IngestJob::jobId)
+                .containsExactly(second.jobId());
+
+        List<IngestJob> all = queue.listJobs(null);
+        assertThat(all).extracting(IngestJob::jobId)
+                .containsExactly(second.jobId(), first.jobId());   // newest first
+    }
+
+    @Test
+    void jobKind_persistsAcrossRestart_andLegacyNullReadsAsFull() throws Exception {
+        IngestJob visual = queue.submit(IngestJob.queuedVisual(sampleRequest("kb"), "doc-v"));
+
+        // A job persisted before the kind field existed (kind == null on disk).
+        IngestJob legacy = new IngestJob("legacy-1", JobStatus.QUEUED,
+                sampleRequest("kb"), "doc-l", java.time.Instant.now(),
+                null, null, null, null, List.of(), 0, null);
+        Files.write(tmpRoot.resolve(legacy.jobId() + ".json"),
+                jacksonMapper().writeValueAsBytes(legacy));
+
+        IngestQueue restarted = newQueue(tmpRoot.toString(), 3);
+        assertThat(restarted.getJob(visual.jobId()).orElseThrow().effectiveKind())
+                .isEqualTo(JobKind.VISUAL);
+        assertThat(restarted.getJob(legacy.jobId()).orElseThrow().effectiveKind())
+                .isEqualTo(JobKind.FULL);
     }
 
     // ---- helpers ------------------------------------------------------------

@@ -26,7 +26,7 @@ The `headingPath` is the load-bearing output: it's what lets
 [StructuralChunker](structural-chunker.md) prepend a
 `"Install > Cooling"` breadcrumb to each chunk's embedded text.
 
-Two completely different extraction paths converge on the same `Block` shape:
+Two different extraction paths converge on the same `Block` shape:
 
 ```mermaid
 flowchart TD
@@ -113,14 +113,18 @@ when any of these change:
 | Case | Behavior |
 |---|---|
 | Tika parse error / malformed input | `IngestException("Failed structured extraction from …")` |
-| scanned PDF, no text layer | `IngestException(… "ColPali / OCR is required" …)` — same message contract as `TextExtractor` |
+| scanned PDF, no text layer (`collectLines` returns nothing) | `NoTextLayerException(… "ColPali / OCR is required" …)` — same type and message contract as `TextExtractor` |
 | PDF with 0 pages | `IngestException` |
 | extracted text exceeds `ingest.extract.max-chars` | `IngestException` (XHTML path counts in `characters()`; PDF path counts after collection) |
 | zero blocks after extraction | `IngestException("Structured extraction produced no blocks …")` |
 
-Every one of these is caught by `ChunkPipeline`, which logs a WARN and falls
-back to the sliding pipeline **for that file** — a weird PDF can't take down
-an ingest.
+Every one of these is caught by `ChunkPipeline` (`catch (RuntimeException)`),
+which logs a WARN and falls back to the sliding pipeline **for that file** —
+a weird PDF can't take down an ingest. For the no-text-layer case the
+fallback then hits the same condition in `TextExtractor.extractPerPage`,
+whose `NoTextLayerException` propagates to `QdrantBackend` — which accepts
+it as zero chunks when a visual index was requested for a PDF, and fails
+the ingest otherwise ([qdrant-backend.md](qdrant-backend.md#no-text-layer-zero-chunks-visual-side-proceeds)).
 
 ## Why it's like this
 

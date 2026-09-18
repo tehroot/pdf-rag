@@ -47,6 +47,16 @@ public class ColPaliPipeline {
     @ConfigProperty(name = "ingest.colpali.prefetch-multiplier", defaultValue = "10")
     int prefetchMultiplier;
 
+    /**
+     * Pages per multivector upsert request. Deliberately separate from (and far
+     * smaller than) the text side's {@code upsert-batch-size}: a ColQwen2-class
+     * page is ~1.5–2 MB as JSON (original + pooled multivectors), and Qdrant
+     * rejects request bodies over its ~32 MB cap, so an unbatched multi-page
+     * doc fails at upsert after all the render/embed work is done.
+     */
+    @ConfigProperty(name = "ingest.qdrant.multivector-upsert-batch-size", defaultValue = "8")
+    int multivectorUpsertBatchSize;
+
     /** Default top-K for searchPages when the caller doesn't specify. */
     private static final int DEFAULT_SEARCH_TOP_K = 10;
 
@@ -148,12 +158,7 @@ public class ColPaliPipeline {
 
         // Ensure the <kb>_pages collection exists with the expected three named vectors.
         String pagesCollection = pagesCollectionName(req.kbName());
-        Map<String, QdrantClient.MultiVectorConfig> namedVectors = new LinkedHashMap<>();
-        namedVectors.put("original", QdrantClient.MultiVectorConfig.originalRerankOnly(vectorDim));
-        namedVectors.put("pooled_rows", QdrantClient.MultiVectorConfig.pooled(vectorDim));
-        namedVectors.put("pooled_cols", QdrantClient.MultiVectorConfig.pooled(vectorDim));
-        qdrant.ensureMultivectorCollection(pagesCollection, namedVectors);
-        qdrant.ensurePayloadIndexes(pagesCollection, INDEXED_PAYLOAD_FIELDS);
+        ensureCollection(pagesCollection, vectorDim);
 
         // Build multivector points.
         Map<String, Object> userMeta = req.metadata() == null ? Map.of() : req.metadata();
@@ -189,7 +194,14 @@ public class ColPaliPipeline {
             points.add(new QdrantClient.MultiVectorPoint(pointId, vectors, payload));
         }
 
-        qdrant.upsertMultivectorPoints(pagesCollection, points);
+        if (multivectorUpsertBatchSize <= 0) {
+            throw new IngestException("ingest.qdrant.multivector-upsert-batch-size must be > 0 (got "
+                    + multivectorUpsertBatchSize + ")");
+        }
+        for (int i = 0; i < points.size(); i += multivectorUpsertBatchSize) {
+            int end = Math.min(i + multivectorUpsertBatchSize, points.size());
+            qdrant.upsertMultivectorPoints(pagesCollection, points.subList(i, end));
+        }
 
         LOG.infof("ingest visual kb=%s doc=%s file=%s pages=%d dim=%d "
                         + "render=%dms probe+store=%dms embed=%dms upsert=%dms",
@@ -248,6 +260,52 @@ public class ColPaliPipeline {
                     p));
         }
         return out;
+    }
+
+    /**
+     * Eagerly create the {@code <kb>_pages} collection (idempotent), taking the
+     * vector dim from the sidecar's {@code /info}. Used at submit time by the
+     * split visual-ingest flow so the KB's visual-capability flag — the
+     * existence of {@code <kb>_pages} — is truthful while the queued visual
+     * job drains; otherwise a second ingest into the same KB would fail mode
+     * validation as "created without a visual index".
+     */
+    public void ensureCollectionFor(String kbName) {
+        ColPaliClient.SidecarInfo info = sidecar.getInfo();
+        if (info == null || info.vector_dim == null) {
+            throw new IngestException("ColPali sidecar /info did not report vector_dim; "
+                    + "cannot create the visual collection for KB '" + kbName + "'");
+        }
+        ensureCollection(pagesCollectionName(kbName), info.vector_dim);
+    }
+
+    /** Idempotently create the pages collection + payload indexes. */
+    private void ensureCollection(String pagesCollection, int vectorDim) {
+        Map<String, QdrantClient.MultiVectorConfig> namedVectors = new LinkedHashMap<>();
+        namedVectors.put("original", QdrantClient.MultiVectorConfig.originalRerankOnly(vectorDim));
+        namedVectors.put("pooled_rows", QdrantClient.MultiVectorConfig.pooled(vectorDim));
+        namedVectors.put("pooled_cols", QdrantClient.MultiVectorConfig.pooled(vectorDim));
+        qdrant.ensureMultivectorCollection(pagesCollection, namedVectors);
+        qdrant.ensurePayloadIndexes(pagesCollection, INDEXED_PAYLOAD_FIELDS);
+    }
+
+    /** Outcome of deleting a single document's pages: whether the {@code <kb>_pages}
+     *  collection existed, and how many stored page images were removed. */
+    public record DeleteDocResult(boolean pointsDeleted, int imagesRemoved) {
+    }
+
+    /**
+     * Delete a single document's pages from {@code <kb>_pages} and remove its
+     * stored page images. No-op (and leaves the image store untouched) when the
+     * KB has no visual index. Idempotent.
+     */
+    public DeleteDocResult deleteDoc(String kbName, String docId) {
+        if (kbName == null || kbName.isBlank() || docId == null || docId.isBlank()) {
+            return new DeleteDocResult(false, 0);
+        }
+        boolean pointsDeleted = qdrant.deleteByDocId(pagesCollectionName(kbName), docId);
+        int imagesRemoved = pointsDeleted ? imageStore.deleteForDoc(kbName, docId) : 0;
+        return new DeleteDocResult(pointsDeleted, imagesRemoved);
     }
 
     /**

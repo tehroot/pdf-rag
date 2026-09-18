@@ -36,12 +36,25 @@ mvn -pl server-http quarkus:dev                              # HTTP transport, l
 # Python sidecar
 cd sidecar
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest -q                       # 26 tests, no torch needed (uses FakeModelHandle)
+.venv/bin/pytest -q                       # 32 tests, no torch needed (uses FakeModelHandle)
 .venv/bin/pip install -e ".[ml]"          # add real ml deps for actual model loading
 .venv/bin/colpali-server                   # run sidecar on :8090
 
-# Whole stack via Docker
-docker compose up -d                       # qdrant + llama-server + colpali-server + pdf-rag-http
+# Whole stack via Docker. A committed docker-compose.override.yml symlink →
+# docker-compose.gpu.yml is auto-loaded, so plain compose is GPU-by-default on
+# an NVIDIA host. On a CPU host, bypass the override with an explicit base file.
+docker compose up -d                       # GPU host: qdrant + llama + colpali(cuda) + pdf-rag-http
+docker compose -f docker-compose.yml up -d # CPU host: ignores the GPU override
+
+# Dev-pipeline wrappers (scripts/, see scripts/README.md) — handle .env, the
+# GPU overlay, model download, and health checks for you:
+scripts/bootstrap.sh                       # one-time: .env + embedding model + ./incoming
+scripts/up.sh [--gpu]                      # start the stack (CPU, or CUDA sidecar)
+scripts/status.sh / logs.sh / down.sh      # health probes / logs / teardown
+scripts/build-images.sh [--gpu]            # docker compose build (no local Maven needed)
+scripts/test.sh [--core|--full|--sidecar]  # run test suites
+scripts/smoke.sh                           # end-to-end wiring check against a running stack
+scripts/pipeline.sh [--gpu]                # full loop: test → build images → up → smoke
 ```
 
 Tests are plain JUnit 5 + WireMock — **not** `@QuarkusTest`. They construct
@@ -64,17 +77,31 @@ methods included) lives in `core` as CDI beans; each transport module is a
 near-empty shell. **To add or change a tool, edit `core` only** — both
 transports pick it up via CDI.
 
+One exception: `server-http` also hosts a plain JAX-RS REST surface
+(`server-http/src/main/java/org/hayden/rest/`, `quarkus-rest-jackson`
+dependency) for the directory-ingest endpoint, served on the same port as
+`/mcp`. The *logic* stays backend-agnostic in `core`
+(`DirectoryIngestService`); only the HTTP binding is in `server-http` (stdio
+has no REST). See [docs/components/directory-ingest.md](docs/components/directory-ingest.md).
+
 ## Architecture
 
 ```
 core/src/main/java/org/hayden/
-├── tools/IngestTools.java              # MCP @Tool surface (7 tools)
+├── tools/IngestTools.java              # MCP @Tool surface (8 tools)
 ├── ingest/
-│   ├── IngestService.java              # dispatcher: picks Backend by arg / default
+│   ├── IngestService.java              # dispatcher: picks Backend by arg / default; ingest(req) + ingest(req, explicitDocId)
 │   ├── IngestRequest / SearchRequest   # tool input records
 │   ├── IngestResult / SearchResponse / SearchHit / InspectPageResult / PageText / DropVisualIndexResult
+│   ├── DirectoryIngestService.java     # scan a dir → per-file ingest (REST endpoint backs onto this)
+│   ├── DirectoryIngestRequest / DirectoryIngestResponse / DirectoryFileOutcome
+│   ├── UploadIngestService.java        # POST /ingest/upload orchestration: store → per-file ingest
+│   ├── UploadedDocumentStore.java      # durable store: sanitize, atomic write, conflicts, ZIP, delete
+│   ├── JobSourceSnapshots.java         # hardlink-pin a queued job's bytes; released on terminal status
+│   ├── BatchIngestExecutor.java        # shared bounded-parallel fan-out (directory + upload)
+│   ├── UploadIngestRequest / UploadIngestResponse
 │   ├── FileFetcher.java                # url / path / inline → FetchedFile (shared)
-│   └── IngestException.java
+│   └── IngestException.java            # + SourceConflict(409) / InsufficientStorage(507) / PayloadTooLarge(413) subtypes
 ├── jobs/
 │   ├── IngestJob.java                  # record: status + request + result + retry counter
 │   ├── JobStatus.java                  # enum: QUEUED / IN_PROGRESS / COMPLETED / FAILED
@@ -119,10 +146,28 @@ core/src/main/java/org/hayden/
         └── dto/
 ```
 
-`IngestTools` exposes seven `@Tool` methods, all `@Blocking`:
+`IngestTools` exposes eight `@Tool` methods, all `@Blocking`:
 `ingest_document`, `search_documents`, `list_knowledge_bases`,
-`get_file_status` (Open WebUI), `inspect_page` (Qdrant visual),
-`get_ingest_status` (async queue), `drop_visual_index` (admin).
+`delete_document` (Qdrant; by doc_id), `get_file_status` (Open WebUI),
+`inspect_page` (Qdrant visual), `get_ingest_status` (async queue),
+`drop_visual_index` (admin).
+
+`server-http` additionally exposes a plain REST surface (`org.hayden.rest.*`,
+`quarkus-rest-jackson`) for bulk/operational use: `POST /ingest/directory`,
+`POST /ingest/upload` (multipart push into the durable `/documents` store;
+see [docs/components/upload-ingest.md](docs/components/upload-ingest.md)),
+`GET /ingest/status/{jobId}`, `GET /ingest/jobs` (list, `?status=` filter),
+`DELETE /ingest/document` (by `doc_id` or `source_path`; add
+`&delete_source=true` — `doc_id` only — to also remove the stored file), plus KB status on
+`GET /kb` (listing with per-KB + total distinct-document counts via the
+Qdrant facet API), `GET /kb/{name}`, and `DELETE /kb/{name}?confirm=true`
+(full teardown: chunk + pages collections, page images, queued jobs). Logic is in `core`
+(`DirectoryIngestService`, `IngestService`); see
+[docs/components/directory-ingest.md](docs/components/directory-ingest.md).
+In the Docker deployment, paths in `POST /ingest/directory` resolve *inside
+the container*: the `./incoming` inbox is at `/docs` (`INGEST_INBOX`) and the
+host's `$HOME` at `/host` (`INGEST_HOST_ROOT`, compose-level var — set `/` on
+Linux for the whole host FS), both read-only.
 
 `IngestService.ingest()` / `.search()` pick a `Backend` by `req.backend()`
 or the configured default (`ingest.backend.default`, env `INGEST_BACKEND`),
@@ -151,28 +196,42 @@ then delegate.
    `PageImageStore.store` → `ColPaliClient.embedPages` →
    `QdrantClient.upsertMultivectorPoints` to `<kb>_pages` collection
    (named vectors: `original` + `pooled_rows` + `pooled_cols`, MAX_SIM
-   comparator, binary quantization on `original`).
+   comparator; `original` is rerank-only: HNSW off, binary quantization
+   `always_ram`, full vectors `on_disk` — RAM holds only BQ codes + pooled).
 
-### Sync vs async routing
+### Sync vs async routing (split visual ingest)
 
 After step 4 (sidecar health check) and before step 5, `QdrantBackend.ingest`
 calls `shouldQueue(file, visualRequested)`:
 
-- **Sync** (steps 5+6 run immediately, returns full `IngestResult`) if any of:
-  text-only ingest, non-PDF file, PDF below `ingest.queue.sync_threshold_pages`
-  (default 20).
-- **Queue** (returns `IngestResult.queued{jobId, "queued", 0 chunks, 0 pages}`)
-  otherwise.
+- **Fully sync** (steps 5+6 run immediately, returns full `IngestResult`) if
+  any of: text-only ingest, non-PDF file, PDF below
+  `ingest.queue.sync_threshold_pages` (default 20).
+- **Split** otherwise: `<kb>_pages` is created eagerly (dim from sidecar
+  `/info` — keeps the visual-capability flag truthful for mode validation
+  while jobs drain), step 5 (text) runs **synchronously**, and only step 6
+  (visual) is queued as a `JobKind.VISUAL` job. Returns
+  `IngestResult.queuedVisual{jobId, "queued", N chunks, 0 pages}` — the doc
+  is text-searchable immediately; the queue is a pure VLM lane (continuous
+  GPU work, no Tika/bge gaps). Chunks and pages join at search time via the
+  shared docId, so no ingest-time link is needed.
 
 Queued jobs persist to `${INGEST_QUEUE_PATH}/<jobId>.json` and are drained by
-the `IngestWorker` thread pool (`ingest.queue.worker_threads`, default 1).
-The worker re-fetches the file from the persisted request, runs steps 5+6
-via `QdrantBackend.ingestForWorker`, and writes the result back to the queue.
-The agent polls `get_ingest_status(job_id)` to track progress.
+the `IngestWorker` thread pool (`ingest.queue.worker_threads`, default 1;
+`2` overlaps one worker's rasterizing with another's GPU embedding — the GPU
+compose overlay defaults to 2). The
+worker re-fetches the file from the persisted request and dispatches on
+`job.effectiveKind()`: `VISUAL` → pages only; `FULL` (legacy jobs persisted
+before the split, `kind == null`) → both pipelines as before. The agent polls
+`get_ingest_status(job_id)` to track progress.
 
 At-least-once on restart: any `IN_PROGRESS` job at startup is requeued
-(`retryCount++`) up to `ingest.queue.max_retries` (default 3). See
-[docs/components/ingest-queue.md](docs/components/ingest-queue.md).
+(`retryCount++`) up to `ingest.queue.max_retries` (default 3). A sidecar-down
+failure mid-drain is transient, not terminal: the worker requeues the job with
+no retry penalty and backs off 5–60 s (`SidecarUnavailableException`); compose
+also gates `pdf-rag-http` on the sidecar's `service_healthy`. See
+[docs/components/ingest-queue.md](docs/components/ingest-queue.md) and
+[docs/plans/split-visual-ingest-v1.md](docs/plans/split-visual-ingest-v1.md).
 
 ### Qdrant search pipeline (fusion)
 
@@ -207,8 +266,13 @@ Unchanged. `OpenWebUiBackend.ingest`: find-or-create KB → multipart upload
 `sidecar/` — separate Python project. FastAPI service exposing the contract
 `ColPaliClient` consumes: `/healthz`, `/info`, `/embed_pages`, `/embed_query`.
 Runs ColPali / ColQwen2 / ColSmolVLM / ColFlor via the `colpali-engine`
-library. Model name is configurable (`COLPALI_MODEL`). The Java side stays
-model-agnostic via `/info`.
+library, plus TomoroAI colqwen3 models (Qwen3-VL backbone, 320-dim head) via
+`trust_remote_code` in a dedicated handle — `loader.handle_class_for` routes
+"tomoro" names BEFORE the "colqwen" substring match, or the checkpoint gets
+forced through Qwen2-VL modeling and crashes. Qwen3-VL-class models use
+sequence-bucket pooling (dynamic resolution, no square grid) and the
+`COLPALI_MAX_VISUAL_TOKENS` cap (default 1280). Model name is configurable
+(`COLPALI_MODEL`). The Java side stays model-agnostic via `/info`.
 
 ## Gotchas (non-obvious, will bite you)
 
@@ -246,18 +310,61 @@ model-agnostic via `/info`.
 - **`/api/v1/knowledge/` returns `{items, total}`**, not a bare array. Open
   WebUI's real shape drifts from its docs. `KnowledgePage` wraps it.
 
-- **Point IDs are UUID v5, deterministic — but docId is random per ingest.**
-  `UuidV5.forChunk(docId, chunkIndex)` and `UuidV5.forPage(docId, pageNumber)`
-  produce identical IDs given identical inputs, but `QdrantBackend.ingest`
-  generates a fresh `docId = UUID.randomUUID()` every call, so re-ingesting
-  the same file ALWAYS creates new points and the old copy's chunks remain.
-  The idempotent-overwrite property only applies within one docId (i.e.
-  queue-worker retries). Before/after chunking comparisons must use fresh KBs
-  (see docs/eval/retrieval-eval.md); no dedupe by source URL.
+- **Point IDs are UUID v5, deterministic — and docId is random EXCEPT for
+  directory ingest.** `UuidV5.forChunk(docId, chunkIndex)` /
+  `forPage(docId, pageNumber)` produce identical IDs given identical inputs.
+  The MCP `ingest_document` path uses `QdrantBackend.ingest(req)` → a fresh
+  `docId = UUID.randomUUID()` every call, so re-ingesting the same file ALWAYS
+  creates new points and the old copy's chunks remain. The **directory-ingest**
+  path instead supplies a deterministic `docId = UuidV5.forSource(kb, absPath)`
+  via `ingest(req, explicitDocId)`, so re-scanning a directory overwrites each
+  file's points in place (idempotent). `doIngest` **deletes the docId's prior
+  points before writing** (`chunks.deleteDoc` / `pages.deleteDoc`), so a changed
+  file that yields fewer chunks leaves no stale tail; on the random-docId MCP
+  path that delete matches nothing (a cheap no-op — the old copy under the
+  previous random id still remains). Before/after chunking comparisons still
+  want fresh KBs (see docs/eval/retrieval-eval.md); no dedupe by source URL.
+
+- **`trust_remote_code` checkpoints must be revision-pinned.** The sidecar
+  *executes* code shipped by the model repo (`modeling_colqwen3.py` for the
+  tomoro handle). With no `revision`, `from_pretrained` tracks `main`, so an
+  upstream push changes what production runs with zero change on our side. On
+  2026-08-14 `TomoroAI/tomoro-colqwen3-embed-4b` migrated to transformers 5.x
+  and the next container recreate died at startup with `AttributeError: 'list'
+  object has no attribute 'items'` (its code now expects `_tied_weights_keys`
+  to be a dict; transformers 4.x gives a list). `COLPALI_MODEL_REVISION` pins
+  it; `bf790bd8780b098b86453444632a184bb770be1a` is the last 4.x-compatible
+  revision. Same weights, same 320-dim head — pinning needs no re-index.
+  Note the sidecar's `transformers>=4.57.2,<5.0` pin is now behind the
+  ecosystem: colpali-engine 0.3.18+ requires `transformers>=5.3`.
 
 - **`<kb>_pages` is the visual-index capability flag.** Implicit state.
   `ColPaliPipeline.isEnabledFor(kbName)` calls `qdrant.getCollection(<kb>_pages)
   != null`. No separate metadata store.
+
+- **Uploads are durable; `/documents` is the corpus of record.** There is no
+  reaper and no retention window — `POST /ingest/upload` writes to a permanent
+  store that queued jobs re-read and re-indexes depend on. Never "clean up"
+  `/documents` in code; deletion is `DELETE /ingest/document?delete_source=true`
+  (doc_id only) or an operator. Related invariants: `kb_name` is validated as a
+  single path segment BEFORE any path is built; a queued visual job's persisted
+  request points at a hardlink under `<root>/.jobs/<jobId>/` so a replace-upload
+  can't swap its bytes; and `QdrantBackend.doIngest` holds a per-doc-id lock
+  across deleteDoc + write — don't "simplify" any of these away.
+
+- **Multivector upserts MUST stay batched small.** A ColQwen2-class page point
+  is ~1.5–2 MB as JSON (original + pooled multivectors) and Qdrant rejects
+  request bodies over its ~32 MB cap — an unbatched multi-page upsert fails
+  with an I/O error *after* all render/embed work is spent (this killed 100+
+  real visual jobs before `ingest.qdrant.multivector-upsert-batch-size`
+  existed). The text side's `INGEST_QDRANT_UPSERT_BATCH=128` is tuned for
+  ~8 KB chunk points; never reuse it for pages.
+
+- **Concurrent ingests race on collection creation.** Parallel directory
+  ingest and multi-worker visual queues can both GET-404 then PUT-create the
+  same collection; `ensureCollection`/`ensureMultivectorCollection` tolerate
+  the loser's conflict by re-reading and validating. Don't "simplify" that
+  try/catch away.
 
 ## Configuration
 
@@ -276,12 +383,27 @@ Env vars (consumed via `@ConfigProperty`, see
 | `EMBED_API_KEY` | `Authorization: Bearer …` | *(empty)* |
 | `EMBED_MODEL` | model name | `bge-large-en-v1.5` |
 | `EMBED_BATCH_SIZE` | batch size per `/embeddings` | `64` |
-| `INGEST_CHUNK_SIZE_CHARS` | chunk size in characters | `1500` |
+| `INGEST_CHUNK_SIZE_CHARS` | chunk size in characters (compose defaults it to `700` — bge's 512-token cap) | `1500` |
 | `INGEST_CHUNK_OVERLAP_CHARS` | adjacent-chunk overlap | `200` |
 | `INGEST_CHUNK_STRATEGY` | `sliding` or `structural` (heading-aware + breadcrumbs) | `sliding` |
 | `INGEST_CHUNK_HEADING_FONT_RATIO` | PDF heading threshold vs body font | `1.15` |
 | `INGEST_CHUNK_BREADCRUMB_MAX_CHARS` | cap on breadcrumb prefix in embedded text | `120` |
-| `INGEST_QDRANT_UPSERT_BATCH` | points per Qdrant upsert call | `128` |
+| `INGEST_QDRANT_UPSERT_BATCH` | chunk points per Qdrant upsert call (text side) | `128` |
+| `INGEST_QDRANT_MULTIVECTOR_UPSERT_BATCH` | page points per multivector upsert (visual side; see gotcha) | `8` |
+| `INGEST_DIRECTORY_PARALLELISM` | files ingested concurrently per `POST /ingest/directory` | `4` |
+| `INGEST_UPLOAD_ROOT` | upload document store root (container: `/documents`) | `~/.pdf-rag-ingest/documents` |
+| `INGEST_DOCUMENTS_DIR` | compose volume/bind for `/documents` (R530: `/tank/documents`) | `documents` |
+| `INGEST_UPLOAD_PARALLELISM` | files ingested concurrently per `POST /ingest/upload` | `4` |
+| `INGEST_UPLOAD_MAX_FILES` | parts accepted per upload request | `200` |
+| `INGEST_UPLOAD_MAX_REQUEST_BYTES` | app-level request cap; keep equal to `UPLOAD_MAX_BODY_SIZE` | `2147483648` |
+| `INGEST_UPLOAD_MIN_FREE_BYTES` | store free-space reserve (breach → HTTP 507) | `10737418240` |
+| `INGEST_UPLOAD_FSYNC` | fsync each stored file before the atomic rename | `true` |
+| `INGEST_UPLOAD_REQUIRE_MOUNT` | refuse uploads when the root isn't a mount point | `true` |
+| `INGEST_UPLOAD_ZIP_ENABLED` | expand uploaded `.zip` parts | `true` |
+| `INGEST_UPLOAD_ZIP_MAX_ENTRIES` | entries per archive | `500` |
+| `INGEST_UPLOAD_ZIP_MAX_UNCOMPRESSED_BYTES` | zip-bomb cap | `2147483648` |
+| `UPLOAD_MAX_BODY_SIZE` | Quarkus HTTP body cap (primary 413 defence; server-http) | `2G` |
+| `UPLOAD_TMP_DIR` | multipart temp dir — must share the store's dataset | `<root>/.tmp`; compose: `/documents/.tmp` |
 | `COLPALI_PREFETCH_MULTIPLIER` | multistage prefetch = N × top_k | `10` |
 | `INGEST_SEARCH_DEBUG_CANDIDATES` | log candidate lists + scores at INFO | `false` |
 | `INGEST_SEARCH_DEDUP` | collapse overlapping chunks in results | `true` |
@@ -293,6 +415,7 @@ Env vars (consumed via `@ConfigProperty`, see
 | `OPEN_WEBUI_API_KEY` | (legacy) Bearer token | *(empty)* |
 | `PORT` | server-http port | `8080` |
 | `MCP_CORS_ORIGINS` | CORS allow-list (Streamable HTTP) | `*` |
+| `SWAGGER_UI_ALWAYS_INCLUDE` | serve Swagger UI on the built server-http, not just dev (build-time; `/q/openapi` schema is always served) | `true` |
 
 Many more tunables (poll backoffs, fusion weights, confidence thresholds,
 text_quality thresholds, etc.) are `ingest.*` keys in the same file. Full
@@ -308,8 +431,10 @@ list in [docs/architecture.md](docs/architecture.md).
 | DELETE | `/collections/{name}` | delete (idempotent on 404) |
 | PUT | `/collections/{name}/index?wait=true` | create payload index (idempotent via payload_schema diff) |
 | PUT | `/collections/{name}/points?wait=true` | upsert (single or multivector) |
+| POST | `/collections/{name}/points/delete?wait=true` | delete points by `doc_id` filter |
 | POST | `/collections/{name}/points/search` | single-vector ANN search |
 | POST | `/collections/{name}/points/query` | multistage prefetch+rerank query |
+| POST | `/collections/{name}/facet` | distinct doc_id count (NOT under `/points` — verified live) |
 
 ## ColPali sidecar contract (used by `ColPaliClient`)
 
@@ -329,8 +454,12 @@ stdout. `list_knowledge_bases` is the cheapest auth+wiring check.
 (extraction, embedding, optional visual side via sidecar, Qdrant collection
 creation, upsert).
 
-HTTP: `docker compose up -d`, then point an MCP client at
-`http://localhost:8080/mcp`.
+HTTP: `docker compose up -d` (GPU host; on a CPU host use `docker compose -f
+docker-compose.yml up -d` to skip the GPU override), then point an MCP client
+at `http://localhost:8080/mcp`. The same port also serves the REST surface
+(`/ingest/*`) and its OpenAPI docs — Swagger UI at
+`http://localhost:8080/q/swagger-ui`, schema at `http://localhost:8080/q/openapi`
+— which double as a quick "is the REST layer up?" check.
 
 ## Component walkthroughs
 

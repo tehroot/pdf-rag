@@ -1,8 +1,8 @@
 # ColPali sidecar (Python)
 
-`sidecar/` — a separate Python project, lives in this repo as a subdirectory.
-A small FastAPI service that wraps a ColVision model (ColPali / ColQwen2 /
-ColSmolVLM / ColFlor) behind the HTTP contract the Java side expects.
+`sidecar/` — a separate Python project in this repo. A FastAPI service
+wrapping a ColVision model (ColPali / ColQwen2 / ColSmolVLM / ColFlor)
+behind the HTTP contract the Java side expects.
 
 The Java side is **model-agnostic** via `/info` — switching models or
 sidecar implementations (PyTorch / ONNX / llama.cpp) is a deploy-time
@@ -15,8 +15,8 @@ Four HTTP endpoints:
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/healthz` | Liveness probe; reports whether the model finished loading. |
-| GET | `/info` | Self-report: model name, vector dim, batch size, device. |
-| POST | `/embed_pages` | Embed a list of page images (base64 PNG) into multi-vectors. Returns `original`, `pooled_rows`, `pooled_cols`. |
+| GET | `/info` | Self-report: model name, vector dim, batch size, device, accepted `encodings`. |
+| POST | `/embed_pages` | Embed a list of page images (base64 PNG) into multi-vectors. Returns `original`, `pooled_rows`, `pooled_cols` — as JSON arrays or base64 floats, per the request's `encoding`. |
 | POST | `/embed_query` | Embed a query string into a multi-token vector. |
 
 ## Project layout
@@ -34,15 +34,20 @@ sidecar/
 │   ├── schemas.py              # pydantic models for wire shapes
 │   ├── model.py                # ModelHandle Protocol + RealModelHandle
 │   ├── loader.py               # load_model(settings) → ModelHandle
-│   ├── pooling.py              # row/col mean pooling (pure Python)
-│   ├── inference.py            # decode b64 → embed → pool → respond
+│   ├── pooling.py              # row/col mean pooling (pure Python) — the reference
+│   ├── pooling_np.py           # vectorized numpy twins of pooling.py — production path
+│   ├── tomoro.py               # TomoroColQwen3Handle (Qwen3-VL family)
+│   ├── inference.py            # decode b64 → embed → pool → orjson bytes
 │   └── main.py                 # FastAPI app + lifespan + endpoints
 └── tests/
     ├── conftest.py             # pytest fixtures (auto-inject FakeModelHandle)
     ├── fakes.py                # FakeModelHandle + make_b64_png helper
     ├── test_api.py             # HTTP surface tests
     ├── test_inference.py       # inference + HTTP integration with fake
-    └── test_pooling.py         # pure-math pooling unit tests
+    ├── test_pooling.py         # pure-math pooling unit tests
+    ├── test_pooling_np.py      # numpy pooling == Python reference (parity)
+    ├── test_wire_bytes.py      # orjson body == pydantic body
+    └── test_wire_encodings.py  # f32b64 / f16b64 round trips, /info encodings
 ```
 
 ## Configuration
@@ -72,12 +77,14 @@ All via environment variables with the `COLPALI_` prefix:
   "supports_pooled": true,
   "pooled_methods": ["rows", "cols"],
   "max_batch_size": 8,
-  "device": "cuda:0"
+  "device": "cuda:0",
+  "encodings": ["json", "f32b64", "f16b64"]
 }
 ```
 
 The Java `ColPaliClient.SidecarInfo` DTO deserializes this verbatim. New
-fields are added optionally — the Java side ignores unknown fields.
+fields are added optionally — the Java side ignores unknown fields
+(`encodings` is one such: the Java DTO does not read it).
 
 ### `POST /embed_pages`
 
@@ -88,11 +95,12 @@ Request:
     {"page_id": "doc-uuid:1", "image_b64": "iVBORw0KG..."}
   ],
   "include_original": true,
-  "include_pooled": true
+  "include_pooled": true,
+  "encoding": "json"                       // json (default) | f32b64 | f16b64
 }
 ```
 
-Response:
+Response with `encoding: json`:
 ```json
 {
   "embeddings": [
@@ -105,6 +113,30 @@ Response:
   ]
 }
 ```
+
+Response with `encoding: f32b64` (what the Java client requests by default)
+or `f16b64`:
+```json
+{
+  "embeddings": [
+    {
+      "page_id": "doc-uuid:1",
+      "original": "AAAAPwAAgD8...",   // base64 of row-major little-endian float32 (f16b64: float16)
+      "pooled_rows": "...",
+      "pooled_cols": "",              // an empty array is ""
+      "dim": 128,                     // rows = len(bytes) / (4*dim)  (2*dim for f16b64)
+      "encoding": "f32b64"            // echoed
+    }
+  ]
+}
+```
+
+`EmbedPagesRequest.encoding` is a `Literal["json", "f32b64", "f16b64"]`
+(`schemas.py`). A client that predates the field sends nothing and gets
+`json`. `f32b64` is bit-identical to the json values at about 2.2 MB/page
+instead of ~5 MB; `f16b64` is about 1.1 MB/page and exact for the model's
+bf16 outputs down to 6.1e-5 in magnitude (below that the float16 subnormal
+range loses bits). `/info.encodings` advertises the accepted values.
 
 `include_original` / `include_pooled` let the Java side request just what it
 needs (small storage saving in dev / debug scenarios).
@@ -127,8 +159,8 @@ Response:
 { "status": "ok", "ready": true }
 ```
 
-`ready: false` while the model is still loading at startup (which can take
-minutes for ColQwen2 on a cold cache).
+`ready: false` while the model is still loading at startup (minutes for
+ColQwen2 on a cold cache).
 
 ## Internal architecture
 
@@ -146,14 +178,23 @@ class ModelHandle(Protocol):
     def embed_query(self, query: str) -> list[list[float]]: ...
 ```
 
-Two implementations:
+Production handles also implement `embed_images_array(images)`, which
+returns one `(batch, tokens, dim)` float32 numpy array from a single
+device-to-host copy (one `.to("cpu")` for the whole batch, then `.numpy()`) — no
+`tolist()`. `inference.embed_pages_arrays` looks it up with `getattr` and
+uses it when present; a handle that only has `embed_images` (the fake, older
+handles) still works, its lists converted once with `np.asarray`.
 
-- `RealModelHandle` — production. Lazy-imports `torch` + `transformers` +
-  `colpali_engine`. Wraps the actual ColVision model. Loading takes
-  ~minutes for ColQwen2-2B on cold cache.
+Implementations:
+
+- `RealModelHandle` (`model.py`) — production, colpali-engine families.
+  Lazy-imports `torch` + `transformers` + `colpali_engine`. Wraps the actual
+  ColVision model. Loading takes ~minutes for ColQwen2-2B on cold cache.
+  Has `embed_images_array`.
+- `TomoroColQwen3Handle` (`tomoro.py`) — production, Qwen3-VL family
+  (`tomoro-colqwen3-*`). Has `embed_images_array`.
 - `FakeModelHandle` (in `tests/fakes.py`) — synthetic vectors shaped like
-  ColPali output. Used by every test so we don't need torch / a real model
-  to run unit tests.
+  ColPali output. Used by every test — no torch / real model needed.
 
 ### Model-class registry
 
@@ -181,8 +222,9 @@ upstream API drift gets a clear runtime error, not an import explosion.
 
 ### Pooling
 
-Pure Python (no numpy / torch). `pooling.py` averages the 32×32 patch grid
-rows or columns and appends the special tokens unchanged:
+`pooling.py` is the reference: pure Python (no numpy / torch). It averages
+the 32×32 patch grid rows or columns and appends the special tokens
+unchanged:
 
 ```python
 def mean_pool_rows(embedding, grid_size=32, n_special_tokens=6):
@@ -206,6 +248,46 @@ column-pooling variant transposes the inner loop.
 
 Adapts gracefully if the input doesn't have exactly `grid_size² + n_special`
 tokens — falls back to the whole embedding rather than throwing.
+
+**Production uses `pooling_np.py`**, vectorized numpy twins of the same
+functions (`mean_pool_rows_np`, `mean_pool_cols_np`, `bucket_pool_np`),
+branch for branch: reshape to `(grid, grid, dim)`, mean over axis 1 (rows)
+or axis 0 (cols), concatenate the specials. Sums accumulate in float64 like
+the Python reference, then cast to float32. `tests/test_pooling_np.py` holds
+them to the reference within float32 rounding. The Python loops cost ~0.6 s
+of a 7 s embed batch on the R530 and the `tolist()` they needed another
+1.2 s (py-spy, 2026-09-17); on the array the same work is a few
+milliseconds.
+
+### Response bytes: orjson from the arrays
+
+`inference.embed_pages_bytes` builds the `/embed_pages` body with
+`orjson.dumps(..., OPT_SERIALIZE_NUMPY)` straight from the numpy arrays;
+`main.py` returns it as a raw `Response(media_type="application/json")`.
+The pydantic `EmbedPagesResponse` is documentation on that route and stays
+the in-process / test path (`embed_pages_inference`). Same JSON shape —
+`tests/test_wire_bytes.py` asserts the bytes path matches the pydantic
+path. For a base64 encoding the arrays are replaced by
+`base64(np.ascontiguousarray(arr, "<f4" | "<f2").tobytes())` and the page
+gets `dim` and `encoding`. Motivation (source docstring): for 12 pages ×
+1,280 tokens × 320 dims, `tolist()` + model validation + `dump_json` cost
+~2.3 s per batch on the sidecar's single thread while the GPU sat idle.
+
+Both changes need `numpy` and `orjson`, which are now **core** dependencies
+in `pyproject.toml` (not `[ml]` extras): the tests run them against the
+fake handle without torch.
+
+### Request handling: the event loop
+
+`/embed_pages` is an `async def` endpoint that calls the synchronous embed
+directly, so it blocks uvicorn's event loop for the whole batch. One
+request is served at a time per process, and `/healthz` cannot answer
+while a batch runs. This is **unchanged** by the numpy / orjson work — the
+batch got shorter, not concurrent. Two consequences: the Docker health
+probe must outlast a batch (see Dockerfiles below), and throughput beyond
+one process comes from replicas behind a balancer
+([../plans/sidecar-throughput-v1.md](../plans/sidecar-throughput-v1.md),
+step 2 — not started).
 
 ### Lifespan + test injection
 
@@ -249,7 +331,13 @@ CMD ["colpali-server"]
 `Dockerfile.cuda` uses `pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime` as the
 base (torch + CUDA pre-installed) and defaults to `COLPALI_MODEL=vidore/colqwen2-v1.0`.
 
-Both include a `HEALTHCHECK` that hits `/healthz` and checks `ready: true`.
+Both include a `HEALTHCHECK` that hits `/healthz` and checks `ready: true`
+(`--timeout=5s`). The repo's `docker-compose.yml` overrides it for the
+`colpali-server` service with `timeout: 40s` (and `start_period: 15m` for
+the first checkpoint download): because the embed endpoint blocks the event
+loop per batch (7 s+ under load), a 5 s probe flipped a *busy* sidecar to
+unhealthy and compose then refused to start dependents — `pdf-rag-http` was
+left stopped on 2026-09-17. The probe timeout must exceed a batch.
 
 ## Hardware / model picker
 
@@ -280,30 +368,41 @@ The wire shape (`/info`) is identical regardless — the Java side adapts.
   today — `colpali-engine` + `transformers` + `torch`. Embedding it directly
   in the JVM is impractical. A small HTTP service is the clean separation.
 - **Model-agnostic wire shape.** `/info` lets the Java side adapt to whatever
-  model the operator chose. Switching from ColPali to ColQwen2 to
-  ColSmolVLM doesn't require recompiling the Java side.
+  model the operator chose — swapping models needs no Java recompile.
 - **Lazy torch imports.** `model.py` only imports torch when
   `RealModelHandle.__init__` runs. The bootstrap test path runs without ML
   deps installed; only deploy-time needs the full `[ml]` extras.
 - **Test injection via module-level state.** `set_model_for_testing(handle)`
   pre-populates the lifespan state so the test suite never tries to load a
   real model. Simple, no FastAPI dependency-override gymnastics.
-- **Pooling in pure Python.** `pooling.py` doesn't need torch — it's
-  list-of-lists arithmetic. Lets us unit-test the pooling math in isolation
-  with simple fixtures.
-- **CPU torch from a separate index.** Pinning to `--index-url
-  download.pytorch.org/whl/cpu` in the CPU Dockerfile keeps the image from
-  pulling multi-GB CUDA wheels we don't need.
+- **Pooling reference in pure Python, production in numpy.** `pooling.py`
+  doesn't need torch — it's list-of-lists arithmetic, easy to read and to
+  unit-test with simple fixtures. `pooling_np.py` is held to it by a parity
+  test, so the fast path can't drift from the readable one. A/B under
+  identical load (plan, step 1 outcome): batch median 4.14 s → 3.03 s
+  (1.37×), vectors bit-identical.
+- **Base64 floats, not a binary content type.** The response stays one JSON
+  document — the same shape, same client parser, same balancer config; only
+  three fields change type. Either side can be old.
 
 ## Tests
 
-26 tests, all run without torch installed (autouse `FakeModelHandle` injection):
+67 tests (as collected by pytest, including parametrized cases), all run
+without torch installed (autouse `FakeModelHandle` injection):
 
-- `test_pooling.py` (9): row/col pooling correctness, grid-size adapt,
+- `test_pooling.py`: row/col pooling correctness, grid-size adapt,
   special-token preservation, sanity checks.
-- `test_inference.py` (8): inference layer + HTTP integration with the fake
+- `test_pooling_np.py`: `bucket_pool_np` and grid pooling match the Python
+  reference over several token counts; rows and cols differ on an
+  asymmetric grid.
+- `test_inference.py`: inference layer + HTTP integration with the fake
   model, include-flag handling, invalid base64 rejection.
-- `test_api.py` (9): HTTP surface — health, info shape, batch limit, blank
+- `test_wire_bytes.py`: the orjson body equals the pydantic body; include
+  flags honoured on the bytes path.
+- `test_wire_encodings.py`: `f32b64` bit-identical to json, `f16b64` within
+  half precision, empty array → `""`, `/info` advertises `encodings`, HTTP
+  `f32b64` round trip.
+- `test_api.py`: HTTP surface — health, info shape, batch limit, blank
   query rejection.
 
 To run:
