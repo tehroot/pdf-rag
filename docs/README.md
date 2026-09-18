@@ -33,6 +33,11 @@ search them. Two backends, picked per-call or by environment default:
                     └────────────┘                                          │
 ```
 
+Since 2026-09-18 the `<kb>_pages` multivector upserts go to Qdrant over
+gRPC (port 6334, `QdrantGrpcUpserter`); collections, searches, deletes and
+chunk upserts stay on REST. With the sidecar pool the ColPali sidecar URL is
+an nginx balancer (`colpali-lb:8090`) in front of local and remote replicas.
+
 ## Documents
 
 | File | What it covers |
@@ -44,6 +49,10 @@ search them. Two backends, picked per-call or by environment default:
 | [mcp-integration.md](mcp-integration.md) | Wiring this server into local LLM stacks that speak MCP: Claude Desktop, Cline / VS Code agents, Open WebUI, browser hosts. |
 | [eval/retrieval-eval.md](eval/retrieval-eval.md) | Retrieval-accuracy eval protocol: gold doc/query sets, page-level hit@K / MRR, side-by-side KB comparison (e.g. sliding vs structural chunking), candidate-log debugging. |
 | [components/directory-ingest.md](components/directory-ingest.md) | REST endpoint `POST /ingest/directory` — bulk-ingest a directory on disk (non-MCP), with idempotent re-scan via deterministic doc IDs. |
+| [components/visual-dataflow.md](components/visual-dataflow.md) | The visual ingest data path across hosts: worker → balancer → sidecar (any host) → worker → Qdrant (gRPC, ingest host). Bytes and cost per hop, operating rules. |
+| [plans/sidecar-pool-v1.md](plans/sidecar-pool-v1.md) | ColPali sidecar pool: nginx least-connections balancer (`docker-compose.pool.yml`, `deploy/colpali-lb.conf`), replicas on a second GPU host, measured rates, what bit. Done 2026-09-17. |
+| [plans/sidecar-throughput-v1.md](plans/sidecar-throughput-v1.md) | Per-replica sidecar throughput: numpy + orjson post-processing (done), binary wire encodings `f32b64` / `f16b64` (done), Qdrant gRPC upsert outcome (done), thread-pool overlap and FlashAttention-2 (not started). |
+| [plans/gpu-text-embedder-v1.md](plans/gpu-text-embedder-v1.md) | llama-server on the GPU, sidecar VRAM headroom (`PYTORCH_CUDA_ALLOC_CONF`), per-document locks, visual-queue stop/resume semantics. Done 2026-09-17. |
 
 ## Tool surface (what an agent sees)
 
@@ -62,9 +71,11 @@ For Qdrant, `chunk_count` is the number of points upserted; `file_id` is the `do
 - Java 21, Quarkus 3.33.1, `quarkiverse-mcp-server` 1.12.0.
 - Three Maven modules: `core` (all logic + all tests), `server-stdio`, `server-http`.
 - Qdrant + llama-server access is via plain `java.net.http.HttpClient` + Jackson — same
-  pattern as the existing Open WebUI client.
+  pattern as the existing Open WebUI client. One exception: the `<kb>_pages`
+  multivector upserts use the official `io.qdrant:client` 1.13.0 over gRPC
+  (`ingest.qdrant.upsert-transport`, default `grpc`; `rest` reverts).
 - Text extraction: Apache Tika 3 (`tika-parsers-standard-package`).
-- 58 JUnit 5 + WireMock tests; `mvn -pl core test` runs in under 10 s and
-  needs no live Qdrant, llama-server, or Open WebUI.
+- 319 JUnit 5 + WireMock tests; `mvn -pl core test` needs no live Qdrant,
+  llama-server, or Open WebUI. 67 sidecar tests (`pytest`, no torch needed).
 
 If you only read one of these, start with [architecture.md](architecture.md).

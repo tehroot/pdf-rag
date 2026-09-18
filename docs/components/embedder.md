@@ -95,6 +95,23 @@ short text chunks comfortably on CPU, and modern vLLM deployments scale much
 higher. Tune up for throughput, down if you hit memory limits on the embedding
 server.
 
+### Deployment: llama-server on the GPU
+
+On a GPU host the compose overlay `docker-compose.gpu.yml` (auto-loaded as
+`docker-compose.override.yml`) runs `llama-server` from the
+`ghcr.io/ggml-org/llama.cpp:server-cuda` image with
+`--n-gpu-layers ${LLAMA_GPU_LAYERS:-99}` added to the base flags
+(`--embeddings --ctx-size --parallel --cont-batching`) and an NVIDIA device
+reservation. Nothing changes in this class — same URL, same wire shape.
+Measured on the R530 (2026-09-17,
+[../plans/gpu-text-embedder-v1.md](../plans/gpu-text-embedder-v1.md)):
+on the CPU the server burned 20 cores at 2000% and capped text ingest at
+~4 docs/min; on the GPU it dropped to under 1% CPU and 284 MiB of VRAM
+(bge-small f16). The sidecar on the same card must leave headroom
+(`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` in the overlay). The
+token-cap overflow recovery below (`"Embedding batch of N rejected as too
+large; isolating per input"` in the log) behaves the same on either device.
+
 ### Per-batch request
 
 `embedBatch(batch)`:

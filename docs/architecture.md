@@ -36,7 +36,9 @@ pdf-rag-ingest/
 │       │   ├── InspectPageResult         inspect_page result
 │       │   ├── PageText                  per-page extraction record
 │       │   ├── FileFetcher.java          url / path / inline → FetchedFile
-│       │   └── IngestException.java
+│       │   ├── IngestException.java
+│       │   ├── NoTextLayerException.java  no extractable text (scanned PDF)
+│       │   └── SidecarUnavailableException.java  transient: worker requeues
 │       └── backend/
 │           ├── Backend.java              interface
 │           ├── KnowledgeBaseSummary.java
@@ -50,6 +52,8 @@ pdf-rag-ingest/
 │           │   ├── Embedder.java         OpenAI-compatible /v1/embeddings
 │           │   ├── QdrantClient.java     REST: collections + points +
 │           │   │                              multivector + multistage query
+│           │   ├── QdrantGrpcUpserter.java  gRPC (:6334) page multivector
+│           │   │                              upserts; REST fallback per batch
 │           │   ├── PageRasterizer.java   PDF → PNG via PDFBox renderer
 │           │   ├── TextLayerProbe.java   per-page text_quality 0|1|2
 │           │   ├── ColPaliClient.java    HTTP client for the sidecar
@@ -133,8 +137,10 @@ in two collaborators:
 QdrantBackend.ingest
   ├──► FileFetcher (URL / path / inline → FetchedFile, shared with OpenWebUi)
   │
-  ├──► ChunkPipeline.ingestChunks         ◄── always runs
-  │       │
+  ├──► ChunkPipeline.ingestChunks         ◄── always runs; a PDF with no
+  │       │                                     text layer yields 0 chunks
+  │       │                                     when visual is requested
+  │       │                                     (NoTextLayerException)
   │       ├──► TextExtractor.extractPerPage    (PDFBox per-page for PDFs,
   │       │                                     Tika single-blob for others)
   │       ├──► Chunker.chunkPerPage             (page-tagged chunks)
@@ -146,8 +152,13 @@ QdrantBackend.ingest
           ├──► PageRasterizer.renderAll        (PDFBox PDFRenderer → PNG bytes)
           ├──► TextLayerProbe.probe            (per-page text_quality 0|1|2)
           ├──► PageImageStore.store            (PNG → filesystem)
-          ├──► ColPaliClient.embedPages        (HTTP → Python sidecar)
+          ├──► ColPaliClient.embedPages        (HTTP → Python sidecar, or the
+          │                                     colpali-lb balancer; vectors
+          │                                     come back as f32b64 by default)
           └──► QdrantClient.upsertMultivectorPoints
+                 └──► QdrantGrpcUpserter     (gRPC :6334 by default; a gRPC
+                                              failure falls back to REST
+                                              for that batch)
                                          → <kb>_pages collection
                                            (named vectors: original +
                                             pooled_rows + pooled_cols,
@@ -157,6 +168,19 @@ QdrantBackend.ingest
 
 Both pipelines share a `docId` (UUID generated once at the top of
 `QdrantBackend.ingest`) — that's the chunk-to-page join key for fusion.
+
+**No text layer.** `TextExtractor` and `StructuredExtractor` throw
+`NoTextLayerException` when a document yields no text. In
+`QdrantBackend.ingestChunksOrNoText` a PDF with a visual index requested
+gets 0 chunks (logged) and proceeds to the visual side; a text-only ingest,
+or a non-PDF, still fails. Before 2026-09-17 every scanned PDF was rejected.
+
+**Per-document locks.** Delete + write for one `docId` is one critical
+section. `QdrantBackend` keeps one reference-counted `ReentrantLock` per
+`docId` in a `ConcurrentHashMap`; an entry exists only while a thread holds
+or waits for it. This replaced 64 lock stripes on 2026-09-17: a visual job
+held its stripe across render + embed for minutes, and unrelated text
+ingests that hashed to the stripe waited the whole time.
 
 ### Visual index opt-in
 
@@ -171,10 +195,18 @@ exists ↔ visual indexing is enabled for that KB. No separate metadata store.
 ### Sidecar-down behavior
 
 Asymmetric:
-- **Ingest** with visual requested + sidecar down → hard-fail. Don't ingest
-  half a document.
+- **Ingest** with visual requested + sidecar down → hard-fail on the sync
+  path. Don't ingest half a document. On the queue path the worker catches
+  `SidecarUnavailableException`, requeues the job without a retry penalty
+  and backs off.
 - **Search** with visual-enabled KB + sidecar down → soft-degrade to text-only
   with `fusion_mode: "text_only_fallback"` in the response.
+
+`ColPaliClient` decides what is transient: an `IOException` on an embed POST
+is retried once after 2 s (embedding is a pure function of the request); a
+second failure throws `SidecarUnavailableException`. HTTP 502/503/504 (a
+balancer with no live upstream, a restart window) are transient too. Any
+other non-2xx is an `IngestException` and fails the job.
 
 ### Async ingest routing
 
@@ -194,7 +226,11 @@ Text-only ingests and small PDFs run fully synchronously.
 
 Queue state persists to `${INGEST_QUEUE_PATH}/<jobId>.json`. On JVM restart,
 `IN_PROGRESS` jobs requeue with `retryCount++` (capped at
-`ingest.queue.max_retries`, default 3).
+`ingest.queue.max_retries`, default 3). A graceful stop is cheaper: when
+`IngestWorker.processOne` sees the interrupt flag or an
+`InterruptedException` in the cause chain, it requeues the job without a
+penalty instead of marking it `FAILED` (before 2026-09-17 every graceful
+restart failed the in-flight jobs).
 
 See [components/ingest-queue.md](components/ingest-queue.md) for the queue
 lifecycle and at-least-once recovery semantics.
@@ -266,7 +302,10 @@ raises throughput only until that host's rendering CPU, Qdrant's parsing,
 or the pool's write bandwidth saturates. Hop-by-hop bytes and costs, the
 consequences, and the operating rules are in
 [components/visual-dataflow.md](components/visual-dataflow.md); the pool
-itself is in [plans/sidecar-pool-v1.md](plans/sidecar-pool-v1.md).
+itself is in [plans/sidecar-pool-v1.md](plans/sidecar-pool-v1.md), and the
+per-replica and Qdrant-side throughput work (numpy + orjson, binary wire
+encodings, gRPC upserts) in
+[plans/sidecar-throughput-v1.md](plans/sidecar-throughput-v1.md).
 
 ## Page-image storage
 
@@ -340,7 +379,11 @@ dedupe by source URL.
 
 All `@ConfigProperty` keys are in
 `core/src/main/resources/application.properties` and inherited by both
-transports.
+transports. The gRPC and wire-encoding keys below are annotation defaults
+only (not in the properties file); set them as system properties or env vars
+(for compose, via `PDF_RAG_JAVA_TOOL_OPTIONS`, e.g.
+`-Dingest.qdrant.upsert-transport=rest`). Never give a key an empty
+`defaultValue`: SmallRye Config treats it as no value and refuses to start.
 
 | Key | Default | Notes |
 |-----|---------|-------|
@@ -352,7 +395,10 @@ transports.
 | `ingest.qdrant.api-key` | *(empty)* | from `QDRANT_API_KEY` |
 | `ingest.qdrant.distance` | `Cosine` | applied on collection create |
 | `ingest.qdrant.upsert-batch-size` | `128` | from `INGEST_QDRANT_UPSERT_BATCH`; chunk points per upsert |
-| `ingest.qdrant.multivector-upsert-batch-size` | `8` | from `INGEST_QDRANT_MULTIVECTOR_UPSERT_BATCH`; page points per upsert (~2 MB JSON each vs Qdrant's ~32 MB request cap) |
+| `ingest.qdrant.multivector-upsert-batch-size` | `8` | from `INGEST_QDRANT_MULTIVECTOR_UPSERT_BATCH`; page points per upsert. Bounded by Qdrant's `service.max_request_size_mb` (32): a 4-page batch of 1,344 × 320 float32 is ~7 MB over gRPC, ~20 MB as REST JSON. The GPU override sets 4. |
+| `ingest.qdrant.upsert-transport` | `grpc` | `grpc` = `<kb>_pages` multivector upserts via `QdrantGrpcUpserter` (packed float32, `wait=true`); `rest` = JSON on the base URL. Everything else is always REST. A gRPC failure logs a warning and falls back to REST for that batch. |
+| `ingest.qdrant.grpc-host` | `auto` | `auto` = host of `ingest.qdrant.url` |
+| `ingest.qdrant.grpc-port` | `6334` | Qdrant's gRPC port |
 | `ingest.directory.parallelism` | `4` | from `INGEST_DIRECTORY_PARALLELISM`; concurrent files per directory scan |
 | `ingest.embed.base-url` | `http://localhost:8081/v1` | llama-server / OpenAI-compat |
 | `ingest.embed.api-key` | *(empty)* | `Authorization: Bearer …` |
@@ -365,7 +411,8 @@ transports.
 | `ingest.visual_index.default_enabled` | `true` | from `INGEST_DEFAULT_VISUAL_INDEX` |
 | `ingest.colpali.sidecar-url` | `http://localhost:8090` | from `COLPALI_SIDECAR_URL` |
 | `ingest.colpali.render-dpi` | `150` | PDFBox render quality |
-| `ingest.colpali.batch-size` | `8` | client-side batch for `/embed_pages` |
+| `ingest.colpali.batch-size` | `8` | from `COLPALI_BATCH_SIZE`; client-side batch for `/embed_pages`; must be ≤ the sidecar's `COLPALI_MAX_BATCH_SIZE` |
+| `ingest.colpali.wire-encoding` | `f32b64` | `encoding` field sent on `/embed_pages`: `json` (lists of numbers), `f32b64` (base64 little-endian float32, bit-identical to json), `f16b64` (float16). The client decodes a JSON array or a base64 string per field, so an older sidecar that ignores the field still works. |
 | `ingest.page_store.impl` | `filesystem` | v1 only |
 | `ingest.page_store.root` | `${user.home}/.pdf-rag-ingest/page-images` | from `INGEST_PAGE_STORE_ROOT` |
 | `ingest.text_quality.threshold_low` / `_full` | `50` / `500` | PDFBox char-count buckets |
@@ -391,13 +438,16 @@ Python sidecar config has its own `COLPALI_*` env prefix; see
 
 ## Testing
 
-Java side: **174 tests, all plain JUnit 5 + WireMock**, no `@QuarkusTest`.
+Java side: **319 tests, all plain JUnit 5 + WireMock**, no `@QuarkusTest`.
 Beans constructed by hand, `@ConfigProperty` fields set via reflection,
-`@PostConstruct init()` invoked reflectively. `mvn -pl core test` runs in
-under 15 seconds without any live services.
+`@PostConstruct init()` invoked reflectively. `mvn -pl core test` runs
+without any live services (the gRPC upserter is covered by conversion unit
+tests, `QdrantGrpcUpserterTest`; no live Qdrant).
 
-Python sidecar: **26 tests, pytest with FastAPI TestClient**, autouse fixture
+Python sidecar: **67 tests, pytest with FastAPI TestClient**, autouse fixture
 pre-injects a `FakeModelHandle` so tests don't need torch. `pytest -q` runs in
-under 2 seconds.
+a few seconds. `test_pooling_np.py` holds the numpy pooling to the Python
+reference within float32 rounding; `test_wire_encodings.py` covers
+`json` / `f32b64` / `f16b64`.
 
 See per-component docs for what each test class covers.

@@ -28,8 +28,8 @@ QdrantBackend.ingest
             ├──► PageRasterizer    (PDF → PNG bytes)
             ├──► TextLayerProbe    (page text_quality 0|1|2)
             ├──► PageImageStore    (PNG → filesystem)
-            ├──► ColPaliClient     (HTTP → Python sidecar)
-            └──► QdrantClient      (multivector upsert → <kb>_pages)
+            ├──► ColPaliClient     (HTTP → Python sidecar; base64 float32 vectors back)
+            └──► QdrantClient      (multivector upsert → <kb>_pages; gRPC by default, REST fallback)
 ```
 
 ## Interface
@@ -105,6 +105,8 @@ for (RenderedPage page : rendered) {
 }
 
 // 4. Embed all pages via the sidecar (batched at ColPaliClient.batchSize).
+//    Each PageEmbedding carries float[][] original / pooledRows / pooledCols,
+//    already decoded from the wire encoding by the client.
 List<PageInput> sidecarInputs = ...;
 List<PageEmbedding> embeddings = sidecar.embedPages(sidecarInputs);
 int vectorDim = embeddings.get(0).original()[0].length;
@@ -128,7 +130,11 @@ for each rendered+embedded page:
     vectors = { original, pooled_rows, pooled_cols }
     pointId = UuidV5.forPage(docId, pageNumber)
 
-qdrant.upsertMultivectorPoints(kbName + "_pages", points);
+for each slice of ingest.qdrant.multivector-upsert-batch-size points:
+    qdrant.upsertMultivectorPoints(kbName + "_pages", slice);
+    // → QdrantGrpcUpserter (packed float32 over gRPC, wait=true) when
+    //   ingest.qdrant.upsert-transport=grpc (default); a gRPC failure is
+    //   logged and that slice is re-sent over REST. See qdrant-client.md.
 return PagesIngestResult(collection, docId, pageCount, vectorDim);
 ```
 
@@ -201,7 +207,8 @@ big-endian int32s) — no need to decode the full image.
 | Case | Result |
 |------|--------|
 | Non-PDF input to `ingestPages` | `IngestException` from `PageRasterizer`. |
-| Sidecar unreachable mid-ingest | `IngestException` from `ColPaliClient`. `QdrantBackend.ingest` translates this to a clear "sidecar unreachable" message. |
+| Sidecar unreachable mid-ingest | `SidecarUnavailableException` (an `IngestException`) from `ColPaliClient` after its one retry, or on a balancer 502/503/504. The queue worker requeues the job without a retry penalty; a synchronous caller sees the exception. (`QdrantBackend.ingest` also pre-flights `sidecarHealthy()` and hard-fails before any work.) |
+| Qdrant gRPC upsert fails | Logged by `QdrantClient`; the same batch is written over REST. Only a REST failure after that surfaces as `IngestException`. |
 | Embeddings count ≠ rendered page count | `IngestException` ("Sidecar returned N embeddings for M rendered pages"). |
 | Mismatched dim on existing collection | `IngestException` from `QdrantClient.ensureMultivectorCollection`. |
 | Image-store write fails (disk full, perms) | `IngestException` from `FilesystemPageImageStore`. |

@@ -5,9 +5,9 @@ flight, and the open decisions. For the architecture see
 [architecture.md](architecture.md); for per-component detail see
 [components/](components/README.md).
 
-**As of:** 2026-07-13 · branch `feature/ingest-endpoint` (ahead of `main`,
-pending merge). The June cycle is committed here; the recent OpenAPI/Swagger
-change + doc updates are **uncommitted in the working tree**.
+**As of:** 2026-09-18 · branch `feature/ingest-endpoint` (ahead of `main`,
+pending merge). The September throughput work (commits `a4d9716`..`8eb15fe`,
+2026-09-17/18) is committed here.
 
 ## Snapshot
 
@@ -17,10 +17,15 @@ visual pipeline, fused via RRF/weighted with confidence scoring); **Open WebUI**
 is the legacy parallel backend. Two transports (stdio, Streamable HTTP); the
 HTTP transport now also serves a plain REST surface.
 
-**Deployment:** live on the Dell R530 (`huge-dumb`) — Qdrant 1.13.4 +
-llama-server (bge-small) + ColQwen2 on the RTX 3070 + the Quarkus MCP server,
-driven by Qwen3 in Open WebUI. End-to-end working; retrieval accuracy "not
-100%", which motivated the retrieval-quality work below.
+**Deployment:** live on the Dell R530 — Qdrant 1.13.4 + llama-server
+(bge-small, on the GPU since 2026-09-17) + one ColPali sidecar
+(`TomoroAI/tomoro-colqwen3-embed-4b`, RTX A4500) + the Quarkus MCP server,
+driven by Qwen3 in Open WebUI. For the DTIC bulk ingest an nginx balancer
+(`colpali-lb`) fronts that sidecar plus eight replicas on `big-dumb` (two
+CMP 170HX, four per card); see
+[plans/sidecar-pool-v1.md](plans/sidecar-pool-v1.md). End-to-end working;
+retrieval accuracy "not 100%", which motivated the retrieval-quality work
+below.
 
 ## Capabilities
 
@@ -54,6 +59,29 @@ driven by Qwen3 in Open WebUI. End-to-end working; retrieval accuracy "not
   out of the schema. Build + runtime verified (200s). **Uncommitted** working-tree
   change, alongside doc updates to [deployment.md](deployment.md) + `CLAUDE.md`.
 
+## Shipped since (September 2026, 17th–18th)
+
+Bulk-ingest throughput for the DTIC corpus (~12k PDFs, ~1.3 M pages). The
+visual rate went from 92 pages/min (one sidecar) to 450–620 pages/min
+(nine sidecars) and the Qdrant upsert from 0.44–0.54 s/page to 0.20 s/page.
+Measured figures are in the plan docs.
+
+| Area | What | Docs |
+|---|---|---|
+| Per-document locks | `QdrantBackend` replaced 64 lock stripes with reference-counted per-`docId` locks (map entries live only while held or waited on). A visual job no longer blocks unrelated text ingests: 40-file batches 93–217 s vs 910–1,103 s with one collision. | [plans/gpu-text-embedder-v1.md](plans/gpu-text-embedder-v1.md) |
+| Text embedder on the GPU | `docker-compose.gpu.yml`: llama-server on the CUDA image with `--n-gpu-layers`; sidecar gets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. llama-server from 2000% CPU to under 1%. | [plans/gpu-text-embedder-v1.md](plans/gpu-text-embedder-v1.md) |
+| Sidecar pool | `docker-compose.pool.yml` + `deploy/colpali-lb.conf` (nginx least-connections, no `max_conns`, `/healthz` busy fallback, embed access log) + `deploy/bigdumb-sidecar-compose.yml` (8 replicas on a second host). Sidecar Docker healthcheck timeout 40 s / 5 retries. Bring-up layers three compose files; `--no-deps` for any recreate during a run. | [plans/sidecar-pool-v1.md](plans/sidecar-pool-v1.md), [deployment.md](deployment.md) |
+| Transient failures | `ColPaliClient`: one retry on `IOException`, then `SidecarUnavailableException` (requeue, no penalty); HTTP 502/503/504 transient. `IngestWorker`: a job interrupted by shutdown is requeued, not FAILED (65 jobs were lost to graceful restarts in one day). | [architecture.md](architecture.md) |
+| No text layer | `NoTextLayerException`: a scanned PDF with a visual index requested yields 0 chunks and proceeds to the visual side (`QdrantBackend.ingestChunksOrNoText`). 524 of ~12k DTIC files had been rejected. | [architecture.md](architecture.md) |
+| JVM heap passthrough | `JAVA_TOOL_OPTIONS: ${PDF_RAG_JAVA_TOOL_OPTIONS:-}` on `pdf-rag-http` for heap sizing and `-D` properties. | [deployment.md](deployment.md) |
+| Sidecar post-processing | `embed_images_array` on both handles (one device-to-host copy), `pooling_np.py`, orjson response; numpy + orjson are core deps. Batch median 4.14 s → 3.03 s per replica, vectors bit-identical. | [plans/sidecar-throughput-v1.md](plans/sidecar-throughput-v1.md) |
+| Binary wire encodings | `EmbedPagesRequest.encoding` = `json` \| `f32b64` \| `f16b64`; `/info` advertises `encodings`. Java requests `ingest.colpali.wire-encoding` (default `f32b64`) and decodes JSON arrays or base64 per field. 12-page batch 61.8 MB → 26.9 MB; heap-space retries 0. | [plans/sidecar-throughput-v1.md](plans/sidecar-throughput-v1.md) |
+| Qdrant gRPC upserts | `QdrantGrpcUpserter` (`io.qdrant:client` 1.13.0, port 6334): `<kb>_pages` multivector upserts as packed float32, `wait=true`, REST fallback per batch. `ingest.qdrant.upsert-transport` (`grpc`), `grpc-host` (`auto`), `grpc-port` (`6334`). Qdrant CPU 350–550% → ~110%. | [plans/sidecar-throughput-v1.md](plans/sidecar-throughput-v1.md), [components/visual-dataflow.md](components/visual-dataflow.md) |
+
+Incident to remember: `@ConfigProperty(defaultValue = "")` is "no value" to
+SmallRye Config; the first gRPC build crash-looped for 9 min. Sentinel
+defaults only, and tag the running image before a risky deploy.
+
 ## Designed, not built
 
 - **Lexical (BM25/sparse) + dense hybrid on the text side.** The text pipeline is
@@ -70,9 +98,10 @@ driven by Qwen3 in Open WebUI. End-to-end working; retrieval accuracy "not
 
 ## Tests
 
-- Java: **242 core unit tests** (plain JUnit 5 + WireMock, no live services;
-  `mvn -pl core test` or `scripts/test.sh --core`). Full reactor builds clean.
-- Python sidecar: **26 tests** (`scripts/test.sh --sidecar`), no torch needed.
+- Java: **319 core unit tests** (plain JUnit 5 + WireMock, no live services;
+  `mvn -pl core test` or `scripts/test.sh --core`; run 2026-09-18, 0 failures).
+- Python sidecar: **67 tests** (`scripts/test.sh --sidecar`), no torch needed;
+  includes numpy-pooling parity and the three wire encodings.
 - No CI configured yet; `scripts/pipeline.sh` is the local stand-in.
 
 ## Open items / decisions
@@ -87,24 +116,32 @@ driven by Qwen3 in Open WebUI. End-to-end working; retrieval accuracy "not
 - **Commit the working-tree changes.** OpenAPI/Swagger + doc/plan updates are
   unstaged. (Note: `scripts/build-images.sh` is also modified but not by this
   work — confirm before staging.)
-- **`deployment.md` refresh.** REST surface + OpenAPI now documented; still
-  carries a "pre-fusion" banner and needs the visual side + `scripts/` integrated.
+- **`deployment.md` refresh.** REST surface, OpenAPI, the compose overlays
+  (GPU, pool) and heap sizing are documented; the doc still carries a
+  "pre-fusion" banner and needs the visual side + `scripts/` integrated into
+  every section. `PDF_RAG_JAVA_TOOL_OPTIONS` is documented in
+  `.env.example` (commented `-Xmx64g` example), `docker-compose.yml` and
+  [deployment.md](deployment.md).
 - **SmallRye `Optional<String>` refactor.** Replace the single-space api-key
   default workaround in compose (the long-standing cleanup).
-- **Multivector upsert cost.** First live per-stage timings (July 2026,
-  milpdfs re-ingest) put the Qdrant upsert at ~307 ms/page — on par with
-  ColQwen2 GPU embedding (~359 ms/page) and ~30% of visual-job wall time.
-  Cause: `wait=true` synchronous indexing on ~2 MB/page JSON bodies.
-  Levers if drain rate starts to matter: gRPC transport, `wait=false` +
-  completion check, or larger multivector batches (bounded by the ~32 MB
-  request cap). Measure first with `INGEST_QUEUE_WORKERS=2` overlap — worker
-  overlap may already hide most of it.
+- **Multivector upsert cost — resolved 2026-09-18** by the gRPC transport
+  (0.20 s/page, was 0.44–0.54 as JSON). Per-page worker cost is now render
+  0.78 s (PDFBox, CPU), embed wait 0.76 s, upsert 0.20 s: rendering is the
+  largest worker-side term. Next levers: sidecar thread-pool overlap and
+  FlashAttention-2 (throughput plan steps 2–3, not started); storage (the
+  pool writes at its sequential ceiling during a load).
+- **Restore HNSW building on `dtic_archive_pages` after the bulk load.**
+  `indexing_threshold` was raised to 100000000 on 2026-09-18 so no graphs
+  build during the load; set it back to 20000 at the end, or pooled-vector
+  prefetch stays brute force. See the throughput plan's step-4 outcome.
 - **Failed-job retry endpoint.** `POST /ingest/jobs/retry` (with an
   `?error_contains=` filter) resubmitting persisted requests under their
   original doc IDs. Deferred July 2026: the sidecar-outage burn that motivated
   it was fixed at the source (transient requeue + backoff + compose
   `service_healthy` gate), and full re-POSTs are idempotent — but selective
   recovery beats a 3 h corpus re-render when something novel fails a batch.
+  Still open after September: failed jobs are terminal and are resubmitted
+  by staging symlinks + `POST /ingest/directory` (pool plan, operating notes).
 - **CI.** No `.github/workflows`; consider wiring `scripts/test.sh --all`.
 - **Merge** `feature/ingest-endpoint` → `main` once reviewed.
 
@@ -117,3 +154,9 @@ driven by Qwen3 in Open WebUI. End-to-end working; retrieval accuracy "not
   path/directory ingest.
 - `llama-server` needs its GGUF present before `up` (`scripts/bootstrap.sh`
   fetches it).
+- Pool replicas across GPU generations (GA102 vs GA100, bf16) are not
+  bit-identical: about 3% of token vectors per page differ (cosine < 0.9),
+  pooled vectors match to 0.999, self-MaxSim 0.993. Accepted for bulk
+  corpora; queries route through the same balancer.
+- Recreate compose services with `--no-deps` during a run; a busy sidecar
+  can fail its health probe and compose then refuses to start dependents.

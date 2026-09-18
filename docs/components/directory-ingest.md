@@ -91,6 +91,21 @@ non-absolute or non-existent `directory`) → `400 {"error": "…"}` via
 `IngestExceptionMapper`. A failure on one *file* never aborts the scan — it
 becomes an `"error"` outcome.
 
+**Scanned PDFs (no text layer).** The `broken.pdf` outcome above is what a
+*text-only* ingest (`enable_visual_index=false`, or a KB created without a
+visual index) returns for a PDF with no text layer: the extractor throws
+`NoTextLayerException` and the file is an `"error"`. When the KB has a
+visual index the same file is **accepted** — `QdrantBackend` records zero
+chunks and runs the visual side, because the page embeddings are what make
+such a document retrievable (see
+[qdrant-backend.md](qdrant-backend.md#no-text-layer-zero-chunks-visual-side-proceeds)).
+Its outcome then looks like any other visual PDF: below the queue threshold
+it is `"completed"` with `chunk_count: 0` and a real `page_count`, and the
+message starts `No text layer (…); 0 chunks ingested, visual side only`; at
+or above the threshold it is `"queued"` with a `job_id` (and, as for every
+queued file, `chunk_count`/`page_count` null in the scan response — the
+zero chunk count is on the job's result).
+
 **The path is resolved inside the server's filesystem.** `directory` is
 validated with a plain `Files.isDirectory()` in the server process — in the
 Docker deployment that means *inside the container*, where only two host

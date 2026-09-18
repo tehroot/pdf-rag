@@ -28,6 +28,8 @@ agent ──MCP──► IngestTools.ingest_document
                   │       ├──► Chunker.chunkPerPage          │  StructuralChunker.chunkBlocks
                   │       │    (page-tagged chunks)          │  (heading breadcrumbs; falls back
                   │       │                                  │   to sliding per-file on failure)
+                  │       │    (a PDF with no text layer → 0 chunks when visual is on;
+                  │       │     NoTextLayerException otherwise)
                   │       ├──► Embedder.embed (llama-server / vLLM) — embeds Chunk.embeddingText()
                   │       ├──► QdrantClient.ensurePayloadIndexes (idempotent, every ingest)
                   │       └──► QdrantClient.upsertPoints  → <kb> collection
@@ -37,8 +39,9 @@ agent ──MCP──► IngestTools.ingest_document
                           ├──► PageRasterizer (PDFBox PDFRenderer → PNG)
                           ├──► TextLayerProbe (text_quality classification)
                           ├──► PageImageStore.store  → filesystem PNG store
-                          ├──► ColPaliClient.embedPages  → Python sidecar
+                          ├──► ColPaliClient.embedPages  → Python sidecar (base64 float32 back)
                           └──► QdrantClient.upsertMultivectorPoints  → <kb>_pages
+                               (QdrantGrpcUpserter, gRPC :6334, REST fallback)
 
                                 search
                                 ──────
@@ -83,8 +86,8 @@ agent ──MCP──► IngestTools.search_documents (retrieval_mode arg)
 | Agent-facing | [mcp-tools.md](mcp-tools.md) | `IngestTools` (7 tools: `ingest_document`, `search_documents`, `list_knowledge_bases`, `get_file_status`, `get_ingest_status`, `inspect_page`, `drop_visual_index`) |
 | Routing | [dispatcher.md](dispatcher.md) | `IngestService`, `Backend` interface |
 | Shared input | [file-fetcher.md](file-fetcher.md) | `FileFetcher` |
-| Orchestration | [qdrant-backend.md](qdrant-backend.md) | `QdrantBackend` |
-| Text pipeline | [text-extractor.md](text-extractor.md) | `TextExtractor` (Tika + PDFBox per-page) |
+| Orchestration | [qdrant-backend.md](qdrant-backend.md) | `QdrantBackend` (mode validation, sync/queue routing, per-doc locks, no-text-layer handling) |
+| Text pipeline | [text-extractor.md](text-extractor.md) | `TextExtractor` (Tika + PDFBox per-page; `NoTextLayerException`) |
 | Text pipeline | [chunker.md](chunker.md) | `Chunker` (page-tagged chunks) |
 | Text pipeline | **[structured-extractor.md](structured-extractor.md)** | `StructuredExtractor` + `Block` (Tika XHTML / PDF font heuristics) |
 | Text pipeline | **[structural-chunker.md](structural-chunker.md)** | `StructuralChunker` (block packing + heading breadcrumbs) |
@@ -92,13 +95,14 @@ agent ──MCP──► IngestTools.search_documents (retrieval_mode arg)
 | Visual pipeline | **[page-rasterizer.md](page-rasterizer.md)** | `PageRasterizer` (PDF → PNG) |
 | Visual pipeline | **[text-layer-probe.md](text-layer-probe.md)** | `TextLayerProbe` (text_quality 0/1/2) |
 | Visual pipeline | **[page-image-store.md](page-image-store.md)** | `PageImageStore` + `FilesystemPageImageStore` |
-| Visual pipeline | **[colpali-client.md](colpali-client.md)** | `ColPaliClient` (HTTP → sidecar) |
+| Visual pipeline | **[colpali-client.md](colpali-client.md)** | `ColPaliClient` (HTTP → sidecar; base64 float wire encoding, one retry, `SidecarUnavailableException`) |
 | Visual pipeline | **[colpali-pipeline.md](colpali-pipeline.md)** | `ColPaliPipeline` (orchestrator for visual ingest+search) |
 | Visual pipeline | **[visual-dataflow.md](visual-dataflow.md)** | The cross-host data path: worker → balancer → sidecar (any host) → worker → Qdrant (ingest host); bytes and cost per hop, operating rules |
-| Vector store | [qdrant-client.md](qdrant-client.md) | `QdrantClient` (collections + points + multivector + multistage) |
+| Vector store | [qdrant-client.md](qdrant-client.md) | `QdrantClient` (REST: collections + points + multivector + multistage) |
+| Vector store | [qdrant-client.md § QdrantGrpcUpserter](qdrant-client.md#qdrantgrpcupserter--multivector-upserts-over-grpc) | `QdrantGrpcUpserter` (multivector page upserts as packed float32 over gRPC, default transport; REST fallback) |
 | Search-side | **[fusion-engine.md](fusion-engine.md)** | `FusionEngine` + `FusionStrategy` + `RrfFusion` + `WeightedScoreFusion` + `ConfidenceCalculator` |
 | Search-side | **[result-deduper.md](result-deduper.md)** | `ResultDeduper` (collapse overlapping chunks in results) |
-| Async ingest | **[ingest-queue.md](ingest-queue.md)** | `IngestJob` + `IngestQueue` + `IngestWorker` (sync/queue routing) |
+| Async ingest | **[ingest-queue.md](ingest-queue.md)** | `IngestJob` + `IngestQueue` + `IngestWorker` (visual-only jobs, transient requeue, requeue on shutdown) |
 | Open WebUI pipeline | [openwebui-backend.md](openwebui-backend.md) | `OpenWebUiBackend` + helpers |
 | Directory ingest (REST) | **[directory-ingest.md](directory-ingest.md)** | `DirectoryIngestService` + `IngestResource` (`POST /ingest/directory`) |
 | Upload ingest (REST) | **[upload-ingest.md](upload-ingest.md)** | `UploadIngestService` + `UploadedDocumentStore` + `JobSourceSnapshots` + `UploadResource` (`POST /ingest/upload`) |
@@ -111,7 +115,7 @@ to reflect their role in the new architecture.
 
 | Doc | What it covers |
 |-----|---------------|
-| **[colpali-sidecar.md](colpali-sidecar.md)** | The whole `sidecar/` subdirectory: contract, model loader, pooling, inference, Dockerfiles, hardware/model picker. |
+| **[colpali-sidecar.md](colpali-sidecar.md)** | The whole `sidecar/` subdirectory: contract (incl. `f32b64`/`f16b64` wire encodings), model handles, numpy pooling, orjson responses, event-loop caveat, Dockerfiles, hardware/model picker. |
 
 ## Structure of each walkthrough
 

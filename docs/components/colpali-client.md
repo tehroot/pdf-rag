@@ -1,6 +1,6 @@
 # ColPaliClient
 
-`core/.../backend/qdrant/ColPaliClient.java` (~270 lines). The Java HTTP
+`core/.../backend/qdrant/ColPaliClient.java` (~420 lines). The Java HTTP
 client that talks to the Python ColPali sidecar. Plain `java.net.http.HttpClient`
 + Jackson, same pattern as the rest of the project's clients.
 
@@ -49,6 +49,7 @@ for client batching, etc.
 | `ingest.colpali.connect-timeout-seconds` | — | `10` |
 | `ingest.colpali.request-timeout-seconds` | — | `300` |
 | `ingest.colpali.batch-size` | `COLPALI_BATCH_SIZE` | `8` |
+| `ingest.colpali.wire-encoding` | — | `f32b64` (`json` / `f32b64` / `f16b64`) |
 
 Long request timeout (5 min) because CPU sidecar embed calls can be slow on
 large batches. Connect timeout stays short — if the sidecar's down we want to
@@ -57,6 +58,10 @@ fail fast.
 `batch-size` here is the **client-side** batch size, separate from the
 sidecar's own `COLPALI_MAX_BATCH_SIZE`; the client splits into batches of
 `min(client_batch_size, sidecar_max_batch_size)`.
+
+`wire-encoding` is the encoding the client *requests* for the page vectors
+(see [Wire encoding](#wire-encoding-and-decodevectors)). A blank value sends
+`json`.
 
 ## Internals
 
@@ -117,21 +122,73 @@ public List<PageEmbedding> embedPages(List<PageInput> pages) {
 
 Each batch:
 1. Base64-encode the PNG bytes (`Base64.getEncoder().encodeToString`).
-2. Build `EmbedPagesRequest{pages, include_original=true, include_pooled=true}`.
-3. POST to `/embed_pages`.
-4. Parse `EmbedPagesResponse{embeddings: [...]}`.
-5. Convert each `List<List<Double>>` to `float[][]` via `to2DFloat`.
-6. Validate: response count must match batch input count.
+2. Build `EmbedPagesRequest{pages, include_original=true, include_pooled=true,
+   encoding=<wire-encoding>}`.
+3. POST to `/embed_pages` (one retry on I/O error, see below).
+4. Parse `EmbedPagesResponse{embeddings: [...]}`. The three vector fields of
+   each `PageEmbeddingDto` are `JsonNode`, plus `Integer dim` and
+   `String encoding` (present with the base64 encodings).
+5. Validate: response count must match batch input count.
+6. Decode each field to `float[][]` via `decodeVectors(node, dim, encoding)`.
 
-The `List<List<Double>>` → `float[][]` conversion is the price of Jackson
-parsing JSON numbers as Double by default; we cast down to float since
-Qdrant stores 32-bit vectors anyway.
+### Wire encoding and `decodeVectors`
+
+```java
+public static float[][] decodeVectors(JsonNode node, Integer dim, String encoding)
+```
+
+Accepts either form per field, so the two sides roll independently:
+
+- **JSON array of arrays** (encoding `json`, or any sidecar that predates
+  the request field and ignored it) → `to2DFloat`: each number read as a
+  double and cast to float. Qdrant stores 32-bit anyway.
+- **Base64 string** (`f32b64` / `f16b64`) → `Base64` decode, then read
+  row-major little-endian floats, `dim` per row: 4 bytes per value for
+  float32 (`FloatBuffer` bulk get), 2 bytes for float16
+  (`Float.float16ToFloat`). `""` is an empty array. Throws if `dim` is
+  missing or not positive, or if the byte count is not a multiple of
+  `width × dim`.
+- `null` / missing node → empty array; any other node type throws.
+
+Why the default is `f32b64` (from the source comment and
+[../plans/sidecar-throughput-v1.md](../plans/sidecar-throughput-v1.md)):
+bit-identical to `json`, 2.3× smaller, one-pass decode. JSON parsing of a
+12-page batch built ~5 million boxed Doubles per worker and set the ingest
+JVM's heap ceiling (R530, 2026-09-17); after the switch, bytes per 12-page
+batch through the balancer fell from 61.8 MB to 26.9 MB and the heap-space
+retries went to 0. `f16b64` is 4.6× smaller than JSON and exact for the
+model's bf16 outputs above 6.1e-5 in magnitude.
 
 ### `embedQuery(query)` — query encoding
 
 One POST, no batching. Returns the multi-token query embedding as
 `float[][]` (each row is one query token's vector). Empty / blank query
 throws.
+
+### Retry once, then `SidecarUnavailableException`
+
+```java
+static final int SEND_ATTEMPTS = 2;
+static final long RETRY_DELAY_MS = 2_000;
+```
+
+`sendRaw` (used by every call) sends up to `SEND_ATTEMPTS` times. An
+`IOException` is logged at WARN with the attempt number, exception class
+and message, then retried once after 2 s on a fresh connection. If both
+attempts fail it throws `SidecarUnavailableException` (a subclass of
+`IngestException`) naming the URI, the attempt count and the last cause.
+Embedding is a pure function of the request, so a retry is safe.
+
+The observation behind it (R530 pool, 2026-09-17, from the source comment):
+about 0.5% of embed POSTs failed with an `IOException` while the balancer
+logged a 200 for every request it saw and no TCP close crossed the wire —
+a client-side condition. A second attempt is cheap; if it also fails the
+queue worker requeues the job as transient rather than failing it.
+
+A **502 / 503 / 504** response also throws `SidecarUnavailableException`
+(no retry here): those come from a proxy or balancer in front of the
+sidecar(s) — no live upstream, restart window — so they are an environment
+condition. Other non-2xx codes throw a plain `IngestException`.
 
 ### Size validation
 
@@ -153,8 +210,11 @@ in `QdrantClient.upsertMultivectorPoints` would be confusing.
 
 | Case | Throws |
 |------|--------|
-| Sidecar unreachable | `IngestException("I/O error calling ColPali sidecar at ...", IOException)`. |
-| Non-2xx response | `IngestException` with status + body. The sidecar's error message is propagated. |
+| Sidecar unreachable / I/O error on both attempts | `SidecarUnavailableException("I/O error calling ColPali sidecar at ... after 2 attempts: <class>: <message>")`. Each failed attempt is WARN-logged with its cause. |
+| 502 / 503 / 504 | `SidecarUnavailableException` with status + body (balancer / proxy has no live upstream). |
+| Other non-2xx response | `IngestException` with status + body. The sidecar's error message is propagated. |
+| Base64 vectors without a positive `dim`, or byte count not a multiple of `width × dim` | `IngestException`. |
+| Interrupted during send or retry sleep | `IngestException("Interrupted calling ColPali sidecar at ...")`, interrupt flag re-set — the worker reads that flag as shutdown. |
 | Sidecar returns wrong embedding count | `IngestException("Sidecar returned N embeddings for M pages")`. |
 | Empty PNG passed to `embedPages` | `IngestException("Cannot embed empty PNG for page ...")` — fail fast before the HTTP call. |
 | Blank query | `IngestException("query is required")`. |
@@ -162,8 +222,10 @@ in `QdrantClient.upsertMultivectorPoints` would be confusing.
 | Malformed JSON response | `IngestException("Failed to parse ColPali sidecar response: ...", IOException)`. |
 | Network error during `isHealthy` | Returns false (doesn't throw). |
 
-No retries. Sidecar transient errors propagate; the caller decides whether
-to retry the whole ingest.
+One retry per request on I/O error, none on HTTP errors. Beyond that,
+transient errors propagate as `SidecarUnavailableException` and the
+queue worker requeues the job ([ingest-queue.md](ingest-queue.md)); a
+synchronous caller sees the exception.
 
 ## Why it's like this
 
@@ -172,11 +234,15 @@ to retry the whole ingest.
   one place to apply the HTTP/1.1 pin.
 - **`float[][]` over `List<List<Float>>`.** Qdrant stores 32-bit; downstream
   code wants primitive arrays for serialization efficiency.
+- **`JsonNode` DTO fields, decoded by hand.** One DTO serves both the JSON
+  and the base64 encodings, and the base64 path never materializes a boxed
+  number per value.
 - **Validate response counts.** Cheap defensive check; turns subtle "wrong
   vector for wrong page" bugs into clear errors.
-- **No retries.** Retries belong upstream (in a job-queue or in the agent's
-  call pattern). Embedding a single page is cheap; the typical retry case
-  is the whole ingest job, not a sub-batch.
+- **Exactly one retry, on I/O errors only.** Job-level retries still belong
+  upstream (the queue worker's transient requeue). The single in-client
+  retry exists because the observed failures were client-side and cleared
+  on a fresh connection; retrying HTTP error codes would mask real faults.
 - **`isHealthy()` swallows exceptions.** Designed for pre-flight checks
   where the caller's question is "should I attempt this expensive operation?"
   — not "tell me exactly why the sidecar's down." The detailed error surfaces
@@ -184,13 +250,16 @@ to retry the whole ingest.
 
 ## Tests
 
-`ColPaliClientTest` (14 tests, WireMock):
+`ColPaliClientTest` (17 tests, WireMock):
 
 - `getInfo` parse correctness.
 - `isHealthy`: ready=true, ready=false, server down (catches Exception),
   5xx response.
 - `embedPages`: single batch, batched split, empty input no-op, mismatched
   response count, empty PNG rejection, non-2xx propagation.
+- Wire encodings: `embedPages_requestsBinaryEncoding_andDecodesFloat32Base64`
+  (the request carries `encoding`, a base64 float32 body decodes),
+  `decodeVectors_float16Base64`, `decodeVectors_rejectsMisalignedBytes`.
 - `embedQuery`: success, blank query, empty vectors response.
 
 The `embed_pages_splitsByBatchSize` test uses `batchSize=4` with 9 inputs to

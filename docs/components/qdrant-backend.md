@@ -1,6 +1,6 @@
 # QdrantBackend
 
-`core/.../backend/qdrant/QdrantBackend.java` (~180 lines). The orchestrator
+`core/.../backend/qdrant/QdrantBackend.java` (~530 lines). The orchestrator
 for the Qdrant backend. Implements the `Backend` interface; delegates the
 actual work to `ChunkPipeline` (text side), `ColPaliPipeline` (visual side),
 and `FusionEngine` (search-time fusion).
@@ -61,8 +61,9 @@ public IngestResult ingest(IngestRequest req) {
                 + "is unreachable. Retry when it's back, or use enable_visual_index=false.");
     }
 
-    // Text ingest always runs.
-    IngestResult chunkResult = chunks.ingestChunks(req, file, docId);
+    // Text ingest always runs — except that a PDF with no text layer
+    // contributes zero chunks when a visual index was requested (below).
+    IngestResult chunkResult = ingestChunksOrNoText(req, file, docId, visualRequested);
 
     // Visual ingest only when requested.
     List<String> warnings = new ArrayList<>();
@@ -127,6 +128,69 @@ cheap.
 requested → warning + text-only ingest for this document. The KB still has
 visual enabled overall; this one doc just doesn't have a visual side.
 
+### No text layer: zero chunks, visual side proceeds
+
+`ingestChunksOrNoText(req, file, docId, visualRequested)` wraps
+`chunks.ingestChunks`. Both extractors throw `NoTextLayerException` (a
+subclass of `IngestException`) when a document yields no text — a scanned
+PDF with no text layer. The wrapper decides:
+
+- visual requested AND the file is a PDF → log at INFO, return a
+  `completed` result with `chunkCount = 0` and the message
+  `"No text layer (…); 0 chunks ingested, visual side only"`. The visual
+  side then runs (or is queued) as usual — the page embeddings are what
+  make such a document retrievable.
+- otherwise (text-only ingest, or a non-PDF) → rethrow. A text-only ingest
+  of a scanned PDF is still a hard failure.
+
+Both the sync path (`doIngest`) and the split-queue submit path use the
+wrapper. Motivation recorded in the source: a directory ingest of a bulk
+scanned corpus rejected every such file outright (524 of ~12k DTIC reports
+skipped on the R530, 2026-09-17).
+
+### Per-document locks
+
+`doIngest` does delete-then-write (`chunks.deleteDoc` / `pages.deleteDoc`,
+then the upserts). Deterministic doc ids mean an upload batch and a
+directory scan — or two uploads of one filename — can target the same doc
+id at once, and two interleaved delete+write sections leave one writer's
+points deleted by the other. So every entry point (sync ingest, split-queue
+submit, worker) holds a per-document lock across its whole delete + write
+critical section.
+
+```java
+private final ConcurrentHashMap<String, DocLock> docLocks = new ConcurrentHashMap<>();
+
+private static final class DocLock {
+    final ReentrantLock lock = new ReentrantLock();
+    int refs;   // holders + waiters; guarded by the map's per-key compute atomicity
+}
+
+private DocLock acquireDocLock(String docId)   // compute(): refs++, then lock()
+private void releaseDocLock(String docId, DocLock dl)   // unlock(), then computeIfPresent(): --refs == 0 → remove
+```
+
+One lock per doc id, reference-counted — **not** a fixed stripe array. The
+earlier 64-stripe design assumed collisions were harmless because ingest
+was I/O-bound. That stopped being true once the visual lane held its stripe
+across render + VLM embed: a 400-page job holds a stripe for minutes, and
+any text ingest whose id hashes to that stripe waits the whole time. Observed
+on the R530 with the DTIC corpus (2026-09-17, see
+[../plans/gpu-text-embedder-v1.md](../plans/gpu-text-embedder-v1.md)): one
+file in a 40-file directory batch waited 16 min behind an unrelated visual
+job; 40-file batches took 159–184 s clean vs 910–1,103 s with one collision.
+With per-doc locks the batches ran 93–217 s. Unrelated documents never
+serialize.
+
+The map is bounded by the number of doc ids with a holder or waiter *right
+now*, not by corpus size: `acquireDocLock` bumps the per-id count under
+`ConcurrentHashMap.compute` (atomic per key), `releaseDocLock` decrements
+and drops the entry at zero under `computeIfPresent`. A new arrival between
+the last holder's unlock and the removal still finds the same entry (its
+compute runs before or after the removal, never interleaved), so two callers
+on one id always share one lock. Single-process is the deployment, so there
+is no distributed lock.
+
 ## Search path
 
 ```java
@@ -161,6 +225,9 @@ each row with `visualIndexEnabled` / `visualIndexPages` via
 | `enable_visual_index=true` + sidecar down | Hard-fail before any work. |
 | `enable_visual_index=true` + non-PDF file | Warning in result; text-only ingest succeeds. |
 | Chunk pipeline throws | Bubbles up; no visual ingest attempted. |
+| PDF with no text layer (`NoTextLayerException`) + visual requested | `completed` with `chunk_count = 0`; the visual side runs (or is queued). |
+| PDF with no text layer + `enable_visual_index=false` (or a non-PDF with no text) | `NoTextLayerException` bubbles up — hard failure, nothing to index. |
+| Two writers on the same doc id at once | The second waits on the per-doc lock; its delete + write runs after the first's completes. Unrelated doc ids never wait on each other. |
 | Visual pipeline throws after text succeeded | Bubbles up; **the text chunks are still in Qdrant**. The visual side is partially committed (whatever points landed before the failure stay). This is consistent with the "best effort" semantics — recovery is re-ingesting after fixing the cause. |
 | Fresh KB, any mode | Goes through; first ingest determines the KB's mode. |
 
@@ -185,6 +252,10 @@ that finds doc_ids with chunks but no pages and re-runs the visual side.
   asked for visual on a KB but happens to be ingesting a DOCX. We can still
   ingest the text (which is the primary value); just warn that the visual
   side was skipped. Future enhancement: pre-convert DOCX → PDF.
+- **Per-doc locks, not stripes.** A stripe array bounds memory but couples
+  unrelated documents; the visual lane holds its lock for minutes, so a
+  collision costs a text ingest minutes. Reference counting keeps the map
+  bounded by concurrent activity instead, with no coupling.
 - **No special handling for the partial-commit case.** Mid-ingest failures
   leave a partial state in Qdrant. We don't add a transactional rollback
   because Qdrant doesn't have multi-collection transactions and the doc-id
@@ -192,7 +263,7 @@ that finds doc_ids with chunks but no pages and re-runs the visual side.
 
 ## Tests
 
-`QdrantBackendTest` (10 tests, WireMock):
+`QdrantBackendTest` (23 tests, WireMock):
 
 Original (search-side and text ingest):
 - `ingest_inlineText_createsCollectionAndUpsertsChunks`
@@ -210,6 +281,13 @@ New (visual orchestration):
 - `ingest_modeMismatch_existingVisualKb_throws`.
 - `ingest_modeMismatch_existingTextOnlyKb_throws`.
 - `ingest_visualRequested_sidecarDown_hardFails`.
+- `ingest_noTextLayerPdf_visualRequested_queuesVisualWithZeroChunks` /
+  `ingest_noTextLayerPdf_textOnly_stillFails` — the `NoTextLayerException`
+  branch of `ingestChunksOrNoText`.
+- `concurrentIngest_sameDocId_serializesDeleteAndWrite` — the per-doc lock.
+- Queue/worker routing: `ingest_bigVisualPdf_ingestsTextSync_andQueuesVisualOnlyJob`,
+  `ingestForWorker_visualJob_runsOnlyVisualSide`,
+  `ingestForWorker_legacyFullJob_runsBothPipelines`.
 
 The `newBackendWithVisual` helper is involved — it wires a real
 `PageRasterizer`, `TextLayerProbe`, `FilesystemPageImageStore` (tmp dir), and

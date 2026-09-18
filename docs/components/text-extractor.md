@@ -26,9 +26,14 @@ public String extract(FetchedFile file);                    // single blob
 public List<PageText> extractPerPage(FetchedFile file);     // per-page (PDFs)
 ```
 
-Both throw `IngestException` if no text was extractable — almost always a
-bad input file or an unsupported format, and we'd rather fail fast than
-upsert empty chunks.
+Both throw `NoTextLayerException` (`org.hayden.ingest`, a subclass of
+`IngestException`) if no text was extractable — almost always a scanned
+PDF with no text layer, a bad input file or an unsupported format, and
+we'd rather fail fast than upsert empty chunks. The subclass exists so
+`QdrantBackend` can tell "nothing to index" apart from other failures: on a
+visual-index ingest of a PDF it records zero chunks and lets the visual
+side proceed; on a text-only ingest it stays a hard failure
+([qdrant-backend.md](qdrant-backend.md#no-text-layer-zero-chunks-visual-side-proceeds)).
 
 ## Interface
 
@@ -66,9 +71,9 @@ the chunker's page-range mapping stays correct when chunks straddle empty
 pages.
 
 If a PDF has no text layer at all (scanned PDF with no OCR baked in), every
-page returns empty and the method throws with a clear message:
-"PDFBox extracted no text from X (likely a scanned PDF without a text layer;
-ColPali / OCR is required to read it)".
+page returns empty and the method throws `NoTextLayerException` with a clear
+message: "PDFBox extracted no text from X (likely a scanned PDF without a
+text layer; ColPali / OCR is required to read it)".
 
 `extract(file)` (the single-blob path) still uses Tika `AutoDetectParser`
 for non-PDF formats. Tika handles OCR transparently via Tesseract for image
@@ -96,7 +101,7 @@ public String extract(FetchedFile file) {
 
     String text = handler.toString();
     if (text == null || text.isBlank()) {
-        throw new IngestException("Tika extracted no text from " + file.filename()
+        throw new NoTextLayerException("Tika extracted no text from " + file.filename()
                 + " (content-type=" + file.contentType() + ")");
     }
     return text;
@@ -122,16 +127,17 @@ Step-by-step:
 5. **Empty output is a failure.** Empty text means either the format isn't
    supported (no parser claimed it) or the file is corrupted / actually empty.
    Propagating it would produce zero chunks downstream, so we throw
-   `IngestException` with the filename + content-type — usually enough to
-   diagnose.
+   `NoTextLayerException` with the filename + content-type — usually enough
+   to diagnose. Parse errors (`TikaException`, `SAXException`, `IOException`)
+   stay a plain `IngestException`.
 
 ## Failure modes
 
 | Case | Result |
 |------|--------|
-| File format Tika can't parse | `IngestException` (Tika's parser may throw `TikaException`, or it succeeds with empty text → we throw the "no text" variant). |
+| File format Tika can't parse | `IngestException` (Tika's parser may throw `TikaException`, or it succeeds with empty text → we throw the `NoTextLayerException` "no text" variant). |
 | File over `maxChars` | Tika throws `SAXException("Your document contained more than … characters …")` after writing the cap. Wrapped in `IngestException`. Action: bump `ingest.extract.max-chars`. |
-| File legitimately yields no extractable text (e.g. scanned PDF with no OCR layer) | `IngestException("Tika extracted no text from … (content-type=…)")`. To recover: install Tesseract on the host and let Tika's `TesseractOCRParser` run, or pre-OCR the file. |
+| File legitimately yields no extractable text (e.g. scanned PDF with no OCR layer) | `NoTextLayerException` — `"PDFBox extracted no text from …"` on the per-page PDF path, `"Tika extracted no text from … (content-type=…)"` on the single-blob path. With a visual index on a PDF the backend accepts this as 0 chunks + visual; otherwise, to recover: install Tesseract on the host and let Tika's `TesseractOCRParser` run, or pre-OCR the file. |
 | Tika dep missing for the format | Same as "no parser claimed it" — empty text. Make sure `tika-parsers-standard-package` is on the classpath; we exclude only the SLF4J bindings, never any parsers. |
 
 ## Why it's like this

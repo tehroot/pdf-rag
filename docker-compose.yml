@@ -189,6 +189,14 @@ services:
       # (R530, 2026-09-17). Set e.g. PDF_RAG_JAVA_TOOL_OPTIONS=-Xmx64g in .env
       # for a large-worker deployment. Empty = JDK defaults.
       JAVA_TOOL_OPTIONS: ${PDF_RAG_JAVA_TOOL_OPTIONS:-}
+      # Qdrant write transport for the <kb>_pages multivector upserts and the
+      # sidecar wire encoding (see QdrantGrpcUpserter / ColPaliClient). The
+      # defaults are what the code uses; these lines only make .env overrides
+      # reach the container.
+      INGEST_QDRANT_UPSERT_TRANSPORT: ${INGEST_QDRANT_UPSERT_TRANSPORT:-grpc}
+      INGEST_QDRANT_GRPC_HOST: ${INGEST_QDRANT_GRPC_HOST:-auto}
+      INGEST_QDRANT_GRPC_PORT: ${INGEST_QDRANT_GRPC_PORT:-6334}
+      INGEST_COLPALI_WIRE_ENCODING: ${INGEST_COLPALI_WIRE_ENCODING:-f32b64}
       COLPALI_BATCH_SIZE: ${COLPALI_BATCH_SIZE:-4}
 
       # Async ingest queue — aggressively queue on CPU sidecars

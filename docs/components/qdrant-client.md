@@ -1,8 +1,13 @@
 # QdrantClient
 
-`core/.../backend/qdrant/QdrantClient.java` (~410 lines). The only place
+`core/.../backend/qdrant/QdrantClient.java` (~730 lines). The only place
 we encode Qdrant's REST shape. Plain `java.net.http.HttpClient` + Jackson,
 same pattern as `Embedder`, `ColPaliClient`, and `OpenWebUiClient`.
+
+One exception: the multivector page upserts go over gRPC by default, through
+`QdrantGrpcUpserter` (`core/.../backend/qdrant/QdrantGrpcUpserter.java`,
+~210 lines), with REST as the fallback. See
+[`QdrantGrpcUpserter`](#qdrantgrpcupserter--multivector-upserts-over-grpc) below.
 
 ## What it does
 
@@ -22,7 +27,7 @@ Fourteen public methods covering the endpoints both pipelines need:
 | `search(coll, vec, topK, filter)` | `POST /collections/{name}/points/search` | Single-vector ANN search with optional payload filter. |
 | **`createMultivectorCollection(name, namedVectors)`** | `PUT /collections/{name}` | Multivector collection with named vectors, MAX_SIM, binary quantization. |
 | **`ensureMultivectorCollection(name, namedVectors)`** | get + create | Idempotent; rejects single-vector existing collections. |
-| **`upsertMultivectorPoints(coll, points)`** | `PUT /collections/{name}/points?wait=true` | Multivector upsert with `{name: float[][]}` per point. |
+| **`upsertMultivectorPoints(coll, points)`** | gRPC `Points/Upsert` (default) via `QdrantGrpcUpserter`; falls back to `PUT /collections/{name}/points?wait=true` | Multivector upsert with `{name: float[][]}` per point. |
 | **`queryMultistage(coll, prefetches, rerank, query, limit, filter)`** | `POST /collections/{name}/points/query` | Prefetch + rerank multistage query. |
 
 Bold = added for the visual pipeline.
@@ -38,6 +43,17 @@ Bold = added for the visual pipeline.
 | `ingest.qdrant.request-timeout-seconds` | — | `120` |
 | `ingest.qdrant.upsert-batch-size` | `INGEST_QDRANT_UPSERT_BATCH` | `128` |
 | `ingest.qdrant.multivector-upsert-batch-size` | `INGEST_QDRANT_MULTIVECTOR_UPSERT_BATCH` | `8` |
+| `ingest.qdrant.upsert-transport` | — | `grpc` (`rest` sends the multivector upserts as JSON on the base URL) |
+| `ingest.qdrant.grpc-host` | — | `auto` (= the host of `ingest.qdrant.url`) |
+| `ingest.qdrant.grpc-port` | — | `6334` |
+
+The three gRPC keys affect only `upsertMultivectorPoints`; every other
+method is REST. `grpc-host` uses the sentinel `auto` rather than an empty
+default on purpose: SmallRye Config treats an empty `defaultValue` as no
+value and refuses to start (that took the ingest service down for ~10 min on
+2026-09-18, see [../plans/sidecar-throughput-v1.md](../plans/sidecar-throughput-v1.md)).
+The gRPC path reuses `ingest.qdrant.api-key` and
+`ingest.qdrant.request-timeout-seconds`.
 
 Auth: `api-key` header (Qdrant's convention, not `Authorization: Bearer`).
 Empty for local; set for Qdrant Cloud.
@@ -166,15 +182,37 @@ public record MultiVectorPoint(String id,
                                 Map<String, Object> payload);
 ```
 
+Transport dispatch:
+
+```java
+if ("grpc".equalsIgnoreCase(upsertTransport) && grpcUpserter != null) {
+    try {
+        grpcUpserter.upsert(collection, points);
+        return;
+    } catch (IngestException e) {
+        LOG.warnf("gRPC upsert into '%s' failed (%s); falling back to REST for this batch", ...);
+    }
+}
+// ... REST PUT below
+```
+
+With `ingest.qdrant.upsert-transport=grpc` (the default) the batch goes to
+`QdrantGrpcUpserter`. A gRPC failure (connection refused, deadline, server
+error — anything the upserter wraps in `IngestException`) is logged at WARN
+and the same batch is written over REST, so a broken gRPC setup is visible
+but never fails a job. `upsert-transport=rest` skips gRPC without a rebuild.
+
 **Callers must batch small** (`ColPaliPipeline` batches by
 `ingest.qdrant.multivector-upsert-batch-size`, default 8 — mirroring how
-`ChunkPipeline` batches by `upsert-batch-size` on the text side). A
-ColQwen2-class page point serializes to ~1.5–2 MB of JSON, and Qdrant rejects
-request bodies over its ~32 MB `max_request_size_mb` cap — an unbatched
-whole-document upsert fails with an I/O error on any non-trivial PDF, *after*
-the render and GPU-embed cost is already spent.
+`ChunkPipeline` batches by `upsert-batch-size` on the text side). Qdrant
+bounds one call by `service.max_request_size_mb` (32 by default) on both
+transports. A ColQwen2-class page point serializes to ~1.5–2 MB of JSON, and
+a 4-page batch of 1,344 × 320 float32 vectors is about 7 MB over gRPC — an
+unbatched whole-document upsert fails on any non-trivial PDF, *after* the
+render and GPU-embed cost is already spent. Raise the server setting before
+raising the batch size.
 
-Wire shape:
+REST wire shape (the fallback, and the whole path when `upsert-transport=rest`):
 
 ```
 PUT /collections/<name>/points?wait=true
@@ -195,7 +233,54 @@ PUT /collections/<name>/points?wait=true
 
 `wait=true` — synchronous from the caller's perspective. Without it, the
 upsert returns immediately but indexing happens asynchronously, leading to
-the Qdrant analogue of the Open WebUI async-processing race.
+the Qdrant analogue of the Open WebUI async-processing race. The gRPC path
+sets `UpsertPoints.wait = true` for the same reason.
+
+### `QdrantGrpcUpserter` — multivector upserts over gRPC
+
+`@ApplicationScoped`, injected into `QdrantClient`. One public method:
+
+```java
+public void upsert(String collection, List<QdrantClient.MultiVectorPoint> points);
+```
+
+Why: the REST upsert writes every float as decimal text (about 20 MB of
+JSON per 4-page call at 1,280 × 320 per page) and Qdrant parses it back.
+Measured on the R530 (2026-09-18,
+[../plans/sidecar-throughput-v1.md](../plans/sidecar-throughput-v1.md)):
+Qdrant at 350–550% CPU and most queue workers waiting on the upsert; after
+the switch, upsert 0.20 s/page (from 0.44–0.54), Qdrant ~110% CPU, ingest
+JVM resident heap ~20 GB (from ~50 GB). Over gRPC the vectors travel as
+packed float32 in protobuf on one multiplexed HTTP/2 connection — nothing
+is formatted or parsed.
+
+Internals:
+
+- **Dependency:** the official `io.qdrant:client` 1.13.0 (version tracks the
+  server), plus `grpc-protobuf` / `grpc-stub` / `grpc-netty-shaded` /
+  `protobuf-java` on the compile classpath because the upserter builds the
+  protobuf messages directly (the client declares them runtime-only).
+- **Connection:** lazily built on the first upsert —
+  `QdrantGrpcClient.newBuilder(host, grpcPort, false)` (plaintext), with
+  `withApiKey` when `ingest.qdrant.api-key` is set. Host is `grpc-host`, or
+  the REST URL's host when `auto`. Closed in `@PreDestroy`.
+- **Conversion** (`toPointStruct`, static, package-tested): each
+  `MultiVectorPoint` becomes a `PointStruct`. The id is a UUID `PointId`
+  when it parses as one, else a numeric id. Each named `float[][]` becomes
+  a `Vector` with the rows flattened into `data` and `vectors_count` = number
+  of rows (`multiVector`). Payload values map to Qdrant's `JsonWithInt.Value`
+  (`toValue`): null / String / Boolean / integral → integer / other Number →
+  double / Map → Struct / Iterable → ListValue / anything else → its
+  `toString`.
+- **Call:** `UpsertPoints{collection, points, wait=true}` via
+  `upsertAsync(...).get(request-timeout-seconds)`. `ExecutionException`,
+  `TimeoutException` and `InterruptedException` (interrupt flag re-set) are
+  wrapped in `IngestException` — which is what `QdrantClient` catches to
+  fall back to REST.
+
+Everything else — collections, payload indexes, deletes, searches, the
+chunk (text) upserts — stays on the REST path. Qdrant serves both ports on
+the same data, so the two transports mix freely.
 
 ### `queryMultistage(coll, prefetches, rerankUsing, rerankQuery, limit, filter)`
 
@@ -259,12 +344,18 @@ across versions.
 | `ensureCollection` dim mismatch | Clear "dim=X but Y produced" message. |
 | `ensureMultivectorCollection` on existing single-vector | Clear "is configured as single-vector" message. |
 | Malformed JSON response | `IngestException("Failed to parse Qdrant response: ...")`. |
+| gRPC upsert fails (unreachable port 6334, deadline, server error) | Logged at WARN; the batch is retried over REST. Only a REST failure after that surfaces as `IngestException`. |
 
 ## Why it's like this
 
 - **Plain `HttpClient` over qdrant-java-client.** Same as everywhere else.
   Smaller dep surface, easier to mock with WireMock, easier to reason about
   HTTP shapes.
+- **…except the multivector upserts, which use the official gRPC client.**
+  That is the one call where JSON formatting and parsing of millions of
+  floats per batch was the measured bottleneck. Scope is deliberately
+  narrow (one method), the REST path stays as the fallback, and
+  `upsert-transport=rest` reverts without a rebuild.
 - **Multivector methods separate from single-vector.** The wire shapes
   differ enough (named vectors as objects vs single vector as array) that
   two surfaces are clearer than one with type-dispatched branches.
@@ -304,3 +395,9 @@ Multivector (9):
 - `multiVectorConfig_presets_haveExpectedShape`
 
 WireMock fixtures verify the exact JSON body shape sent on the wire.
+
+`QdrantGrpcUpserterTest` (5 tests, no server — protobuf conversion only):
+`multiVector_flattensRowsAndCountsThem`, `multiVector_emptyIsZeroRows`,
+`pointId_uuidAndNumeric`, `toValue_mapsJavaTypesToQdrantJsonWithInt`,
+`toPointStruct_carriesNamedMultivectorsAndPayload`. The live gRPC round trip
+is verified by deployment (see the plan's outcome table), not by a unit test.

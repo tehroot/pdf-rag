@@ -98,11 +98,29 @@ curl -s http://localhost:8090/info | jq
 #   "supports_pooled": true,
 #   "pooled_methods": ["rows", "cols"],
 #   "max_batch_size": 4,
-#   "device": "cpu"
+#   "device": "cpu",
+#   "encodings": ["json", "f32b64", "f16b64"]
 # }
 ```
 
 If `ready` is false, the model is still loading. Wait and retry.
+
+`encodings` lists the wire encodings the sidecar accepts for `/embed_pages`.
+The ingest service requests `f32b64` by default; a sidecar built before that
+field omits it and answers `json`. Check the binary path with one blank page
+(a 64x64 white PNG):
+
+```bash
+PNG=iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAATUlEQVR42u3PQQ0AAAgEILV/5zOFDzdoQCepz6aeExAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQELi3cqoDfaKuZM4AAAAASUVORK5CYII=
+curl -s -X POST http://localhost:8090/embed_pages \
+  -H "Content-Type: application/json" \
+  -d "{\"pages\":[{\"page_id\":\"smoke:1\",\"image_b64\":\"$PNG\"}],\"encoding\":\"f32b64\"}" \
+  | jq '.embeddings[0] | {encoding, dim, original: (.original | type), pooled_rows: (.pooled_rows | type)}'
+# Expected: {"encoding":"f32b64","dim":128,"original":"string","pooled_rows":"string"}
+# dim equals vector_dim from /info. Each array is base64 of row-major
+# little-endian float32; rows = bytes / (4 * dim). An array that was not
+# requested is "".
+```
 
 If you see `vector_dim` other than what you expect (e.g., 768 for some
 SmolVLM variants), the sidecar is fine but the dim flowed through to Qdrant

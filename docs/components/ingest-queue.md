@@ -109,10 +109,13 @@ moves straight to `FAILED`. Retries only happen on **crash recovery** —
 i.e., if the JVM dies mid-ingest, leaving the job in `IN_PROGRESS`.
 
 The exception is `SidecarUnavailableException` (sidecar down or still
-loading its model): that's an environment condition, not a job defect, so
-the worker calls `queue.requeueTransient(jobId)` — back to `QUEUED` with
-**no retryCount penalty** — and backs off (5 s doubling to 60 s, reset on
-the next non-transient outcome). Without this, a down sidecar fast-failed
+loading its model; since 2026-09-17 also an I/O error that survives
+`ColPaliClient`'s one retry, and a 502/503/504 from the balancer in front
+of the sidecar pool — see [colpali-client.md](colpali-client.md)): that's
+an environment condition, not a job defect, so the worker calls
+`queue.requeueTransient(jobId)` — back to `QUEUED` with **no retryCount
+penalty** — and backs off (5 s doubling to 60 s, reset on the next
+non-transient outcome). Without this, a down sidecar fast-failed
 queued jobs at ~3 ms each and destroyed 130 real jobs during one restart
 window. Compose adds belt-and-braces: `pdf-rag-http` now waits on the
 sidecar's `service_healthy` (ready = model loaded), so a normal stack start
@@ -227,12 +230,21 @@ private void workerLoop() {
     }
 }
 
-public void processOne(IngestJob job) {
+public boolean processOne(IngestJob job) {           // true = transient, caller backs off
     try {
         IngestResult result = backend.ingestForWorker(job);
         queue.markCompleted(job.jobId(), result);
+        return false;
+    } catch (SidecarUnavailableException e) {
+        queue.requeueTransient(job.jobId());           // no retry penalty
+        return true;
     } catch (Exception e) {
-        queue.markFailed(job.jobId(), e.getMessage());
+        if (shuttingDown(e)) {                          // stop() interrupted us mid-job
+            queue.requeueTransient(job.jobId());
+            return true;
+        }
+        queue.markFailed(job.jobId(), message);
+        return false;
     }
 }
 ```
@@ -247,8 +259,26 @@ thread-timing dances. The worker thread just calls it in a loop.
 2. Interrupt each worker thread.
 3. Wait up to 5 seconds for each to exit via `Thread.join`.
 
-Jobs mid-ingest at shutdown get left in `IN_PROGRESS` on disk. Next startup
-will requeue them (with `retryCount++`).
+A job mid-ingest when the interrupt lands is **requeued, not failed**. The
+clients (`ColPaliClient`, `QdrantClient`, `QdrantGrpcUpserter`) catch the
+`InterruptedException`, re-set the thread's interrupt flag and throw an
+`IngestException` with it as the cause; `processOne` recognizes that via
+`shuttingDown(e)` — true when the current thread carries the interrupt flag
+or an `InterruptedException` sits anywhere in the cause chain — and calls
+`queue.requeueTransient(jobId)` (back to `QUEUED`, no `retryCount`
+penalty, hardlink snapshot kept). `shuttingDown` is deliberately **not**
+keyed on the `running` flag: tests drive `processOne` without `start()`,
+and a job that fails for its own reasons during the stop window must still
+be recorded as `FAILED`.
+
+Before this, every graceful restart FAILED the jobs in flight
+("Interrupted calling ColPali sidecar/Qdrant") — 65 jobs lost across a day
+of restarts on the R530, 2026-09-17 (source comment; see
+[../plans/gpu-text-embedder-v1.md](../plans/gpu-text-embedder-v1.md)).
+
+If the JVM dies without `stop()` (kill -9, OOM), the job stays `IN_PROGRESS`
+on disk and the next startup requeues it with `retryCount++` (crash
+recovery, above).
 
 ### Why `ingestForWorker` instead of `ingest`?
 
@@ -300,9 +330,11 @@ Returns the full `IngestJob` record. Agents poll until
 | `INGEST_QUEUE_PATH` not set | `IngestException` at startup. |
 | Persisted JSON corrupt | `.json.err` sibling written; queue continues without that job. |
 | Worker thread exits unexpectedly | Logged; remaining worker threads continue (degraded throughput). |
-| Worker thread interrupted (shutdown) | Thread exits cleanly; mid-ingest job left `IN_PROGRESS` → next startup requeues with `retryCount++`. |
+| Worker thread interrupted (graceful `stop()`) | Mid-ingest job is requeued via `requeueTransient` (status `QUEUED`, no retry penalty); the thread exits. Next startup drains it normally. |
+| JVM dies without `stop()` | Mid-ingest job left `IN_PROGRESS` on disk → next startup requeues with `retryCount++`. |
 | Job exceeds retry cap | Marked `FAILED` permanently with "Retry cap (N) reached" prefix. |
-| Sidecar down mid-ingest | Worker catches exception, marks job `FAILED`. Agent sees the error message on next poll. |
+| Sidecar down / unreachable mid-ingest (`SidecarUnavailableException`: health check false, I/O error after the client's retry, or balancer 502/503/504) | Requeued without retry penalty; worker backs off 5 s → 60 s. Agent keeps seeing `QUEUED`. |
+| Sidecar returns another non-2xx, or a malformed response | `IngestException` → worker marks job `FAILED`. Agent sees the error message on next poll. |
 | Same URL ingested twice into a visual KB | Two distinct doc_ids → duplicate page coverage. Same as sync ingest; no dedupe by source. |
 | Worker can't re-fetch URL after submit | Worker marks `FAILED` with the I/O error. |
 
@@ -350,11 +382,12 @@ Returns the full `IngestJob` record. Agents poll until
 - `IN_PROGRESS` on restart → requeued with `retryCount++`.
 - `IN_PROGRESS` past the retry cap → moved to `FAILED`.
 
-`IngestWorkerTest` (6 tests):
+`IngestWorkerTest` (7 tests):
 
 - `processOne` happy path: completes + attaches result.
 - `processOne` with `IngestException` → marks `FAILED` with the exception message.
 - `processOne` with `RuntimeException` → marks `FAILED`.
+- `processOne_sidecarUnavailable_requeuesWithoutRetryPenalty`.
 - Null exception message → records the exception's class name.
 - Worker thread start/stop honors the shutdown flag.
 - End-to-end: submit → worker picks up → completes (polls for status).
