@@ -1,6 +1,9 @@
 # Plan: ColPali sidecar throughput (v1)
 
-Status: proposed
+Status: proposed — steps 1-4 NOT started. Superseded for now by the
+replica pool (sidecar-pool-v1.md), which gave 5-6x without touching the
+sidecar. The findings below still hold and steps 1 and 4 are the next
+per-replica gains; step 4 moved up in priority (see "Status update").
 Author drafted: 2026-09-17
 
 ## Context
@@ -154,3 +157,24 @@ bulk runner should be paused at a batch boundary during the swap, as in
   a time under the lock, so peak VRAM does not change, but host RAM per
   in-flight request (decoded PNGs, numpy outputs) adds up to a few hundred
   MB per worker. The box has 97 GB free.
+
+## Status update (2026-09-17, evening)
+
+Not implemented yet. What changed the priorities:
+
+- The pool (sidecar-pool-v1.md) took the visual rate from 92 to 450-600
+  pages/min with the sidecar code unchanged. Per-replica efficiency (steps
+  1-3) now multiplies across nine replicas.
+- Step 4 (binary embeddings on the wire) is no longer "later". The
+  60-78 MB JSON response per batch is what filled the ingest JVM's heap:
+  each of 24 workers held the response bytes plus the boxed
+  `List<List<Double>>` parse plus a document's accumulated vectors, and
+  the JDK default 30 GiB heap overflowed inside the HTTP client
+  ("IOException: Java heap space" on embed reads, about one job per
+  minute). Mitigated with -Xmx48g and 20 workers (5b1b74f) and a client
+  retry (9851501). A float16 array on the wire is 10 MB and parses in one
+  pass, which removes the memory ceiling on the pool's consumer side.
+- Step 2 (thread pool + lock) also fixes the health-probe problem the
+  balancer had to work around (deploy/colpali-lb.conf, /healthz fallback).
+
+Order now: 4, then 1, then 2, then 3.

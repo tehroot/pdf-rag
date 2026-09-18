@@ -1,6 +1,6 @@
 # Plan: move the text embedder to the GPU and cap the sidecar's VRAM (v1)
 
-Status: proposed
+Status: done (2026-09-17). See "Outcome" at the end.
 Author drafted: 2026-09-17
 
 ## Context
@@ -226,3 +226,27 @@ file fails the job inline, and inline failures do not retry.
 `docker compose start pdf-rag-http`. A re-index of the visual side is only
 needed if the model or its vector dimension changes, which this plan does
 not do.
+
+## Outcome (2026-09-17)
+
+Applied on the R530 the same day (commits a4d9716, 129cd2a).
+
+- Embedder on the GPU: llama-server dropped from 2000% CPU to under 1%,
+  284 MiB of VRAM. Host load fell from 28 to 6.
+- Text ingest did NOT speed up from that alone: the limiter was the
+  64-stripe document lock. A visual job held its stripe across render and
+  embed, so any text ingest hashing to that stripe waited minutes
+  (40-file directory batches: 159-184 s clean vs 910-1,103 s with one
+  collision). Replaced with per-doc reference-counted locks (a4d9716).
+  Batches then ran 93-217 s: about 17 documents/min vs 3.6.
+- The visual rate did not move (92 pages/min before and after). The
+  sidecar was the bottleneck; see sidecar-throughput-v1.md and
+  sidecar-pool-v1.md.
+- The stop/resume analysis above was WRONG on one point: a graceful stop
+  did not requeue in-flight jobs. The worker caught the interruption and
+  marked them FAILED. Fixed in 9851501 (requeue on shutdown); two later
+  restarts lost zero jobs.
+- The sidecar's Docker health probe (5 s) marked a busy sidecar unhealthy
+  and compose then refused to start dependents, leaving pdf-rag-http
+  stopped for 5 min. Probe timeout raised to 40 s (129cd2a). Always
+  recreate services with --no-deps during a bulk run.
