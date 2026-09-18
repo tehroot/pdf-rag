@@ -1,9 +1,8 @@
 # Plan: ColPali sidecar throughput (v1)
 
-Status: steps 1 and 4 DONE (2026-09-17/18, commits 2ab91e8 and 7e2c015,
-rolled out to all nine replicas and the ingest service); steps 2 and 3 not
-started. See the outcome sections at the end. After step 4 the limiter
-moved to Qdrant ingestion (see "Step 4 outcome").
+Status: steps 1 and 4 DONE (2026-09-17/18, commits 2ab91e8 and 7e2c015),
+plus the follow-on Qdrant gRPC upsert (07e6cdd, 0021eb5); steps 2 and 3
+not started. See the outcome sections at the end.
 Author drafted: 2026-09-17
 
 ## Context
@@ -237,3 +236,35 @@ segments is brute force (correct, slower queries).
 Next Qdrant-side levers, in order: gRPC upserts (binary, no 1.6 MB JSON per
 page to parse), then storage — the pool is spinning mirrors and writes at
 its sequential ceiling during the load.
+
+## Qdrant gRPC upsert outcome (2026-09-18)
+
+`QdrantGrpcUpserter` sends the `<kb>_pages` multivector upserts as packed
+float32 over gRPC (port 6334, official io.qdrant:client 1.13.0), `wait=true`.
+Everything else stays REST. `ingest.qdrant.upsert-transport=rest` reverts
+without a rebuild; a gRPC failure logs and falls back to REST for that
+batch.
+
+| | REST JSON (after step 4) | gRPC |
+|---|---|---|
+| upsert, s/page (from the ingest log) | 0.44-0.54 | 0.20 |
+| Qdrant CPU | 350-550% | ~110% |
+| ingest JVM resident heap | ~50 GB | ~20 GB |
+| worker pages completed per 9 min | ~4,400 | 5,276 |
+| balancer embed requests per 9 min | 489 | 536 |
+
+Per-page cost on a worker is now render 0.78 s (PDFBox, CPU), embed wait
+0.76 s (queueing at the pool), upsert 0.20 s. Rendering is the largest
+worker-side term; the sidecar pool is busy at ~250 W on both big-dumb
+cards in most samples.
+
+**Incident during the rollout:** the first build crash-looped for 9 min
+(01:39-01:48 EDT). `@ConfigProperty(defaultValue = "")` is treated by
+SmallRye Config as *no* default, so `ingest.qdrant.grpc-host` was
+"missing" and the JVM refused to start; the previous image id had already
+been pruned, so the revert did not land. Recovered by passing
+`-Dingest.qdrant.grpc-host=qdrant` through `PDF_RAG_JAVA_TOOL_OPTIONS`,
+then fixed properly with a sentinel default (`auto`, 0021eb5). Lessons,
+now practice: never use an empty `defaultValue`; tag the running image
+(`:prev`) before a risky deploy. The queue lost nothing (jobs on disk,
+runner paused by pid).

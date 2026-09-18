@@ -65,12 +65,15 @@ R530 ─────────────────────────
    pass (`ColPaliClient.decodeVectors`). Nothing is boxed; the arrays are
    handed straight to the Qdrant client in the same JVM.
 6. **Upsert.** `QdrantClient` writes `INGEST_QDRANT_MULTIVECTOR_UPSERT_BATCH`
-   pages per call (4) to the `<kb>_pages` collection over REST on the
-   compose network, `wait=true`, so the call returns when the write is
-   durable. Point ids are `UuidV5(docId, pageNumber)`, so a retry
-   overwrites rather than duplicates. Today this hop is JSON: the float
-   arrays are written out as decimal text (about 20 MB per 4-page call)
-   and parsed again by Qdrant.
+   pages per call (4) to the `<kb>_pages` collection, `wait=true`, so the
+   call returns when the write is durable. Point ids are
+   `UuidV5(docId, pageNumber)`, so a retry overwrites rather than
+   duplicates. Since 2026-09-18 this hop is gRPC (`QdrantGrpcUpserter`,
+   port 6334 on the compose network): the float arrays travel as packed
+   float32 in protobuf, about 7 MB per 4-page call, nothing formatted or
+   parsed. `ingest.qdrant.upsert-transport=rest` selects the old JSON path
+   (about 20 MB of decimal text per call, parsed again by Qdrant); a gRPC
+   failure falls back to it per batch.
 7. **Persist.** Qdrant appends to a segment and flushes to the pool
    (`/tank/qdrant`, spinning mirrors). `original` is stored on disk with
    binary quantization in RAM and no HNSW (`m: 0`); `pooled_rows` /
@@ -83,12 +86,13 @@ R530 ─────────────────────────
 |---|---|---|---|
 | worker → sidecar | HTTP over the LAN via nginx | 1–25 MB PNG | sidecar CPU decodes and preprocesses |
 | sidecar → worker | HTTP over the LAN via nginx | 27 MB base64 float32 | worker: one-pass decode |
-| worker → Qdrant | HTTP on the R530 bridge, 3 calls × 4 pages | ~60 MB JSON text | worker writes, Qdrant parses (350–550% CPU) |
+| worker → Qdrant | gRPC on the R530 bridge, 3 calls × 4 pages | ~21 MB packed float32 | neither side formats or parses; Qdrant ~110% CPU (was ~60 MB JSON at 350–550%) |
 | Qdrant → disk | ZFS pool | ~20 MB raw + index and WAL | pool write bandwidth (~250 MB/s observed) |
 
 The LAN is not a constraint: at ~40 batches/min the sidecar→worker hop is
-~20 MB/s on a gigabit link. The expensive conversions are all on the R530,
-on the last two hops.
+~20 MB/s on a gigabit link. With the gRPC hop the remaining conversions are rendering on the
+worker and Qdrant's own segment writes; the pool's write bandwidth is the
+next ceiling.
 
 ## Consequences of this shape
 
@@ -106,10 +110,10 @@ on the last two hops.
 - **Queries take the same path in reverse.** `search_documents` embeds the
   query text through the balancer (whichever replica answers) and scores
   against Qdrant on the R530.
-- **Nothing off-host writes Qdrant.** Every writer is the ingest service.
-  Moving its upsert from REST to gRPC (Qdrant's 6334, binary packed
-  floats) changes only that one hop and no other client; Qdrant serves
-  both ports on the same data.
+- **Nothing off-host writes Qdrant.** Every writer is the ingest service,
+  and its page upserts use gRPC (6334) while everything else uses REST
+  (6333); Qdrant serves both ports on the same data, so no other client
+  is affected by that choice.
 
 ## Operating rules that follow
 
