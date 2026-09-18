@@ -1,9 +1,7 @@
 # Plan: ColPali sidecar throughput (v1)
 
-Status: proposed — steps 1-4 NOT started. Superseded for now by the
-replica pool (sidecar-pool-v1.md), which gave 5-6x without touching the
-sidecar. The findings below still hold and steps 1 and 4 are the next
-per-replica gains; step 4 moved up in priority (see "Status update").
+Status: step 1 DONE (2026-09-17, commit 2ab91e8, rolled out to all nine
+replicas); steps 2-4 not started. See "Step 1 outcome" at the end.
 Author drafted: 2026-09-17
 
 ## Context
@@ -178,3 +176,27 @@ Not implemented yet. What changed the priorities:
   balancer had to work around (deploy/colpali-lb.conf, /healthz fallback).
 
 Order now: 4, then 1, then 2, then 3.
+
+## Step 1 outcome (2026-09-17)
+
+Implemented as: `embed_images_array` on both handles (one device-to-host
+copy, float32 numpy), `pooling_np.py` (vectorized twins of the pooling
+functions, held to the Python reference by `tests/test_pooling_np.py`),
+and an `/embed_pages` body built by orjson straight from the arrays. Same
+JSON shape; pydantic path kept for tests. 62 sidecar tests pass.
+
+A/B on big-dumb GPU 1 under identical load (old and new image as two
+spares beside three production replicas, 8-page batches, real DTIC pages,
+6 rounds interleaved):
+
+| | old | new |
+|---|---|---|
+| batch median | 4.14 s | 3.03 s (1.37x) |
+| response | 52.0 MB | 41.4 MB |
+| vectors | — | bit-identical (cosine 1.000 on every token, self-MaxSim 1.0000) |
+
+Less than the 1.6x estimate: the estimate was for the single-thread
+critical path on an idle card; on a shared card the GPU wait dominates
+the remainder. Rollout: rolling `--force-recreate` per replica, ~10 s each,
+no job loss (balancer 502 during a swap is transient for the client since
+9851501).
