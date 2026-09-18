@@ -89,6 +89,19 @@ class TomoroColQwen3Handle:
             out = self._model(**batch)
         return _embeddings_of(out).detach().to("cpu").float().tolist()
 
+    def embed_images_array(self, images: list["Image"]):
+        """``(batch, tokens, dim)`` float32 numpy array; ONE device-to-host
+        copy, no ``tolist()``. Same values as ``embed_images``."""
+        import numpy as np
+        import torch
+
+        if not images:
+            return np.zeros((0, 0, 0), dtype=np.float32)
+        batch = self._processor.process_images(images=images).to(self._device)
+        with torch.no_grad():
+            out = self._model(**batch)
+        return _embeddings_of(out).detach().to("cpu").float().numpy()
+
     def embed_query(self, query: str) -> list[list[float]]:
         import torch
 

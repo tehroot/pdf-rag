@@ -18,6 +18,10 @@ dependencies = [
     # Pillow is small, pure-Python-friendly, and needed by the inference
     # layer for PNG decoding regardless of which model backend runs.
     "pillow>=10.0,<12.0",
+    # The inference layer pools and serializes numpy arrays (pooling_np.py,
+    # orjson) whichever model backend runs.
+    "numpy>=1.26,<3.0",
+    "orjson>=3.9,<4.0",
 ]
 
 [project.optional-dependencies]
@@ -31,7 +35,6 @@ ml = [
     # imports them); colpali-engine models are unaffected by the floor bump.
     "transformers>=4.57.2,<5.0",
     "accelerate>=0.34,<2.0",
-    "numpy>=1.26,<3.0",
     # colpali-engine provides ColPaliForRetrieval / ColQwen2ForRetrieval + pooling helpers.
     "colpali-engine>=0.3.5,<1.0",
 ]

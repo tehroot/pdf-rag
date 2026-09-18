@@ -143,6 +143,18 @@ class RealModelHandle:
             out = self._model(**batch)
         return _tensor_to_nested_list(out)
 
+    def embed_images_array(self, images: list["Image"]):
+        """``(batch, tokens, dim)`` float32 numpy array; one device-to-host copy."""
+        import numpy as np
+        import torch
+
+        if not images:
+            return np.zeros((0, 0, 0), dtype=np.float32)
+        batch = self._processor.process_images(images).to(self._device)
+        with torch.no_grad():
+            out = self._model(**batch)
+        return out.detach().to("cpu").to(_float32()).numpy()
+
     def embed_query(self, query: str) -> list[list[float]]:
         import torch
 
