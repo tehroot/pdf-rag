@@ -30,6 +30,38 @@
             <version>${quarkus-mcp-server.version}</version>
         </dependency>
 
+        <!-- Official Qdrant gRPC client: used for the multivector page upserts
+             (packed float32 over HTTP/2 on port 6334, no JSON to build or
+             parse). Everything else stays on the REST client in QdrantClient.
+             Version tracks the server (1.13.x). -->
+        <dependency>
+            <groupId>io.qdrant</groupId>
+            <artifactId>client</artifactId>
+            <version>1.13.0</version>
+        </dependency>
+        <!-- The client declares these runtime-only; our upserter builds
+             protobuf messages directly, so they must be on the compile
+             classpath. Versions managed by the Quarkus BOM. -->
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-protobuf</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-stub</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-netty-shaded</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.apache.tika</groupId>
             <artifactId>tika-core</artifactId>

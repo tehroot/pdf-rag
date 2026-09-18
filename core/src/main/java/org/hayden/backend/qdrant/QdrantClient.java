@@ -38,6 +38,8 @@ import java.util.Set;
 @ApplicationScoped
 public class QdrantClient {
 
+    private static final org.jboss.logging.Logger LOG = org.jboss.logging.Logger.getLogger(QdrantClient.class);
+
     @ConfigProperty(name = "ingest.qdrant.url")
     String baseUrl;
 
@@ -49,6 +51,17 @@ public class QdrantClient {
 
     @ConfigProperty(name = "ingest.qdrant.connect-timeout-seconds", defaultValue = "10")
     long connectTimeoutSeconds;
+
+    /**
+     * Transport for the multivector page upserts: {@code grpc} (packed
+     * float32 on port 6334, see {@link QdrantGrpcUpserter}) or {@code rest}
+     * (JSON on the base URL). Everything else is always REST.
+     */
+    @ConfigProperty(name = "ingest.qdrant.upsert-transport", defaultValue = "grpc")
+    String upsertTransport;
+
+    @Inject
+    QdrantGrpcUpserter grpcUpserter;
 
     @ConfigProperty(name = "ingest.qdrant.request-timeout-seconds", defaultValue = "120")
     long requestTimeoutSeconds;
@@ -393,6 +406,18 @@ public class QdrantClient {
     public void upsertMultivectorPoints(String collection, List<MultiVectorPoint> points) {
         if (points.isEmpty()) {
             return;
+        }
+        if ("grpc".equalsIgnoreCase(upsertTransport) && grpcUpserter != null) {
+            try {
+                grpcUpserter.upsert(collection, points);
+                return;
+            } catch (IngestException e) {
+                // A transport problem must not fail the job: the REST path
+                // below writes the same points. Logged so a broken gRPC
+                // setup is visible rather than silently slow.
+                LOG.warnf("gRPC upsert into '%s' failed (%s); falling back to REST for this batch",
+                        collection, e.getMessage());
+            }
         }
         List<Map<String, Object>> rendered = new ArrayList<>(points.size());
         for (MultiVectorPoint p : points) {
