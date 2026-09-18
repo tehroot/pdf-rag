@@ -94,6 +94,7 @@ agent ──MCP──► IngestTools.search_documents (retrieval_mode arg)
 | Visual pipeline | **[page-image-store.md](page-image-store.md)** | `PageImageStore` + `FilesystemPageImageStore` |
 | Visual pipeline | **[colpali-client.md](colpali-client.md)** | `ColPaliClient` (HTTP → sidecar) |
 | Visual pipeline | **[colpali-pipeline.md](colpali-pipeline.md)** | `ColPaliPipeline` (orchestrator for visual ingest+search) |
+| Visual pipeline | **[visual-dataflow.md](visual-dataflow.md)** | The cross-host data path: worker → balancer → sidecar (any host) → worker → Qdrant (ingest host); bytes and cost per hop, operating rules |
 | Vector store | [qdrant-client.md](qdrant-client.md) | `QdrantClient` (collections + points + multivector + multistage) |
 | Search-side | **[fusion-engine.md](fusion-engine.md)** | `FusionEngine` + `FusionStrategy` + `RrfFusion` + `WeightedScoreFusion` + `ConfidenceCalculator` |
 | Search-side | **[result-deduper.md](result-deduper.md)** | `ResultDeduper` (collapse overlapping chunks in results) |

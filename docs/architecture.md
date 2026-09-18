@@ -255,6 +255,19 @@ feeding the existing text⊕visual fusion unchanged. Two plans:
 [plans/lexical-bm25-hybrid-neu-v1.md](plans/lexical-bm25-hybrid-neu-v1.md)
 (learned sparse via the sidecar).
 
+## Visual ingest across hosts: the data path
+
+With the sidecar pool, the ColPali replicas run on other machines but the
+data path has one shape: a vector crosses the network once, from the
+sidecar that computed it back to the ingest service, which writes it into
+Qdrant on its own host. Sidecars are stateless and never talk to Qdrant;
+all write load lands on the ingest host, which is why adding replicas
+raises throughput only until that host's rendering CPU, Qdrant's parsing,
+or the pool's write bandwidth saturates. Hop-by-hop bytes and costs, the
+consequences, and the operating rules are in
+[components/visual-dataflow.md](components/visual-dataflow.md); the pool
+itself is in [plans/sidecar-pool-v1.md](plans/sidecar-pool-v1.md).
+
 ## Page-image storage
 
 `<kb>_pages` Qdrant payload carries only a `page_image_key` (opaque string).
