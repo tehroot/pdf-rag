@@ -56,8 +56,13 @@ public class QdrantGrpcUpserter {
     @ConfigProperty(name = "ingest.qdrant.url")
     String restUrl;
 
-    /** Empty = the host of {@code ingest.qdrant.url}. */
-    @ConfigProperty(name = "ingest.qdrant.grpc-host", defaultValue = "")
+    /**
+     * {@code auto} = the host of {@code ingest.qdrant.url}. (Not an empty
+     * default: SmallRye Config treats an empty string as "no value" and
+     * refuses to start — that took the ingest service down for 10 minutes on
+     * 2026-09-18.)
+     */
+    @ConfigProperty(name = "ingest.qdrant.grpc-host", defaultValue = "auto")
     String grpcHost;
 
     @ConfigProperty(name = "ingest.qdrant.grpc-port", defaultValue = "6334")
@@ -78,7 +83,7 @@ public class QdrantGrpcUpserter {
             synchronized (this) {
                 c = client;
                 if (c == null) {
-                    String host = (grpcHost == null || grpcHost.isBlank())
+                    String host = (grpcHost == null || grpcHost.isBlank() || "auto".equalsIgnoreCase(grpcHost))
                             ? URI.create(restUrl).getHost() : grpcHost;
                     QdrantGrpcClient.Builder b = QdrantGrpcClient.newBuilder(host, grpcPort, false);
                     if (apiKey != null && !apiKey.isBlank()) {
