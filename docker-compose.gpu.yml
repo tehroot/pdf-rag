@@ -66,7 +66,11 @@ services:
       --host 0.0.0.0
       --port 8081
       --ctx-size ${LLAMA_CTX_SIZE:-8192}
-      --parallel ${LLAMA_PARALLEL:-4}
+      # 8 slots on a GPU host: with the sidecar pool feeding 12 concurrent
+      # text ingests, 4 slots left every text thread queued on the embedder
+      # (R530, 2026-09-18: 2.8 -> 31 files/min after raising it). ctx-size /
+      # slots must stay >= the model's 512-token cap (8192 / 8 = 1024).
+      --parallel ${LLAMA_PARALLEL:-8}
       --cont-batching
       --n-gpu-layers ${LLAMA_GPU_LAYERS:-99}
     deploy:

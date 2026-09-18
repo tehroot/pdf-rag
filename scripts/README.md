@@ -28,6 +28,7 @@ symlink — `scripts/up.sh` is always CPU, `--gpu` is always GPU, regardless of 
 
 | Script | What it does |
 |---|---|
+| `bulk_ingest_runner.py` | Python, not a wrapper: resumable bulk loader for a directory tree via `POST /ingest/directory` — unique staged symlink batches, several in flight, done-state read from Qdrant and the jobs API, error skip policy. `--help` for options; see docs/deployment.md "Bulk directory loads". |
 | `bootstrap.sh` | One-time setup: copy `.env.example`→`.env`, download the embedding GGUF into `./models`, create the `./incoming` inbox. `--sidecar` also builds the Python venv; `--no-model` skips the download. |
 | `build.sh` | Local Maven build of the Java jars. `--test` includes tests, `--http` builds only the HTTP transport + deps. (Not needed for images — the container builds its own jar.) |
 | `build-images.sh` | `docker compose build` for the buildable services (colpali-server, pdf-rag-http). `--gpu` builds the CUDA sidecar, `--no-cache` rebuilds clean. |

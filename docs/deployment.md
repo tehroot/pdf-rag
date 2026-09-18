@@ -391,6 +391,42 @@ Group=pdfrag
 WantedBy=multi-user.target
 ```
 
+### Bulk directory loads
+
+For a corpus of thousands of PDFs use `scripts/bulk_ingest_runner.py`
+rather than one `POST /ingest/directory` over the whole tree: the text side
+runs synchronously inside the call and a big call is cut by the 30-minute
+HTTP idle timeout while the server keeps working. The runner posts small
+batches (default 40 files, 3 in flight), each staged as a uniquely named
+directory of symlinks under a path the container sees as `/host/...`, and
+decides what is still missing from Qdrant and the jobs API, so it can be
+killed and restarted freely. `--help` lists the options; the module
+docstring has the R530 invocation.
+
+Sizing that held on the R530 (40 cores, one A4500, eight remote sidecar
+replicas), 2026-09-18:
+
+| Setting | Value | Why |
+|---|---|---|
+| runner `--batch` / `--concurrent` | 40 / 3 | 3 calls x 4 files per call = 12 text threads; each call ends in 1-3 min |
+| `LLAMA_PARALLEL` | 8 (GPU override default) | 12 text threads on 4 slots queued on the embedder: 2.8 files/min; 8 slots: ~31 files/min |
+| `INGEST_QUEUE_WORKERS` | 20 | keeps ~2 embed requests in flight per sidecar replica |
+| `PDF_RAG_JAVA_TOOL_OPTIONS` | `-Xmx48g` | ~1-2 GB per worker on long documents |
+| `indexing_threshold` on `<kb>_pages` | raised for the load, restored after | see the throughput plan |
+
+Two things the runner protects against, learned the hard way: a staging
+directory reused across runs re-ingests its old contents (replace
+semantics, then vacuum churn in Qdrant), so batch directories are never
+reused; and pausing the runner must be done by pid (`kill -STOP`), because
+`pkill -f` on a pattern that appears in your own shell's command line stops
+the shell too.
+
+Chunks longer than the text embedder's 512-token cap make the embedder
+reject the 64-chunk batch, and the client then sends those chunks one
+request each (the `Embedding batch of N rejected as too large; isolating
+per input` warning). It is correct but slow; keep `INGEST_CHUNK_SIZE_CHARS`
+small enough that OCR-heavy text stays under the cap.
+
 ## Health & observability
 
 - **Liveness/readiness**: not currently exposed as a dedicated health endpoint.
