@@ -14,6 +14,7 @@ themselves, so they work from any directory. They read `.env` (via
 scripts/bootstrap.sh      # .env + embedding model + ./incoming inbox (one time)
 scripts/up.sh             # start the CPU stack in the background
 scripts/status.sh         # containers + health probes
+scripts/deps.sh --gpu     # what transformers/colpali-engine the image really got
 scripts/smoke.sh          # end-to-end wiring check
 scripts/down.sh           # stop
 ```
@@ -35,6 +36,7 @@ symlink — `scripts/up.sh` is always CPU, `--gpu` is always GPU, regardless of 
 | `restart.sh` | Restart one or all services. |
 | `logs.sh` | Follow logs (all services, or one: `qdrant`/`llama-server`/`colpali-server`/`pdf-rag-http`). |
 | `status.sh` | `compose ps` plus an HTTP health probe of each service. |
+| `deps.sh` | ML dependency versions resolved inside the sidecar image (`--gpu`, `--all`). Works while the sidecar is crash-looping; the input to pinning them. |
 | `test.sh` | `--core` (default, fast) / `--full` (all Java modules) / `--sidecar` (pytest) / `--all`. |
 | `smoke.sh` | Probe a running stack and exercise the pdf-rag-http REST surface end to end. |
 | `clean.sh` | Tear down + delete volumes + `mvn clean`. `--all` also removes the sidecar venv. Keeps `./models`, `./incoming`, `.env`. |
