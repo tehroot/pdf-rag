@@ -12,31 +12,41 @@ search them. Two backends, picked per-call or by environment default:
   + embedding + storage; we attach the file to a named KB.
 
 ```
-            ┌───────────────────────────────────────────────────────────────┐
-            │                     pdf-rag-ingest (this server)              │
-            │                                                               │
-            │    IngestService  ─dispatch by backend arg / INGEST_BACKEND─┐ │
-            │                                                             │ │
-┌────────┐  │   ┌────────────────────────────┐    ┌──────────────────────┐│ │
-│        │  │   │  QdrantBackend             │    │  OpenWebUiBackend    ││ │
-│  LLM /  │MCP│  │  fetch → Tika → chunk →   │    │  fetch → upload →    ││ │
-│  agent │◀───▶│  embed → Qdrant            │    │  poll → /file/add    ││ │
-│        │  │   └──────────┬─────────────┬──┘    └──────────┬───────────┘│ │
-└────────┘  │              │             │                  │            │ │
-            └──────────────┼─────────────┼──────────────────┼────────────┘ │
-                           ▼             ▼                  ▼              │
-                    ┌────────────┐ ┌──────────┐    ┌─────────────────┐     │
-                    │ Qdrant REST│ │llama-srv │    │ Open WebUI REST │     │
-                    │ /collections│ │/v1/embed │    │ /api/v1/...     │     │
-                    │ /points    │ └──────────┘    └─────────────────┘     │
-                    │ /search    │                                          │
-                    └────────────┘                                          │
+ ┌───────────┐  MCP   ┌───────────────────────────────────────────────────────────────────┐
+ │ LLM /     │◀──────▶│ pdf-rag-ingest (this server)                                      │
+ │ agent     │        │                                                                   │
+ └───────────┘        │ IngestService ── dispatch by `backend` arg / INGEST_BACKEND       │
+                      │         │                                            │            │
+                      │         ▼                                            ▼            │
+                      │  ┌───────────────────────────────────────┐  ┌──────────────────┐  │
+                      │  │ QdrantBackend                         │  │ OpenWebUiBackend │  │
+                      │  │  text:   fetch → Tika → chunk →       │  │ fetch → upload → │  │
+                      │  │          embed → upsert <kb>     (REST)  │ poll → /file/add │  │
+                      │  │  visual: render → embed pages →       │  └────────┬─────────┘  │
+                      │  │          upsert <kb>_pages       (gRPC)           │            │
+                      │  └────┬────────────┬──────────────┬──────┘           │            │
+                      │       │            │              │                  │            │
+                      └───────┼────────────┼──────────────┼──────────────────┼────────────┘
+                              │            │              │                  │
+                  REST :6333  │            │ HTTP         │ HTTP /embed_pages│  REST
+                  gRPC :6334  │            │              │ (f32b64 back)    │
+                              │            │              │                  │
+                              ▼            ▼              ▼                  ▼
+                       ┌─────────────┐ ┌─────────┐ ┌───────────────────┐ ┌──────────────┐
+                       │ Qdrant      │ │ llama-  │ │ colpali-lb (nginx,│ │ Open WebUI   │
+                       │ <kb>   REST │ │ server  │ │ least_conn)       │ │ /api/v1/...  │
+                       │ <kb>_pages  │ │ /v1/emb │ │ ├ colpali-server  │ │              │
+                       │        gRPC │ │ (GPU)   │ │ │   local GPU     │ └──────────────┘
+                       │             │ │         │ │ └ colpali-0a…1d   │
+                       └─────────────┘ └─────────┘ │     2nd GPU host  │
+                                                   └───────────────────┘
 ```
 
-Since 2026-09-18 the `<kb>_pages` multivector upserts go to Qdrant over
-gRPC (port 6334, `QdrantGrpcUpserter`); collections, searches, deletes and
-chunk upserts stay on REST. With the sidecar pool the ColPali sidecar URL is
-an nginx balancer (`colpali-lb:8090`) in front of local and remote replicas.
+Text chunks and searches use Qdrant's REST port; the `<kb>_pages`
+multivector upserts use gRPC (`QdrantGrpcUpserter`, port 6334). Page
+embeddings come back from whichever sidecar the balancer picked, as base64
+float32 (`f32b64`); the sidecars hold no state and never talk to Qdrant.
+See [components/visual-dataflow.md](components/visual-dataflow.md).
 
 ## Documents
 
