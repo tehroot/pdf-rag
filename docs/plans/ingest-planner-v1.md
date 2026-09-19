@@ -292,6 +292,18 @@ One step at a time, each behind config, measured on a real corpus slice:
 - **Decision C, step 4 timing.** It is the largest change and the only one
   that touches crash-recovery semantics. Recommendation: after steps 0–3
   have run one full corpus.
+- **Decision D, what a path-derived id is keyed on.** `DirectoryIngestService`
+  keys the deterministic id on the absolute path of the scanned entry
+  *without resolving symlinks*. The bulk runner stages every batch as a
+  fresh directory of symlinks, so a file submitted twice (a retry, a
+  fix-up pass) gets two document ids and the second ingest does not
+  replace the first: 35 files re-ingested on 2026-09-19 now exist twice.
+  Resolving symlinks (`toRealPath`) would fix this for new corpora but
+  changes every id in a KB that was loaded through symlinks, so it cannot
+  be flipped on `dtic_archive` without a re-key. Recommendation: step 1's
+  content hash becomes the identity and the path id stays as a label;
+  until then, a fix-up pass must reuse the original staging path or
+  delete the old id first.
 - **Hash cost.** SHA-256 of a 240 MB PDF is ~0.5 s; negligible against
   rendering. Files above the upload cap are already rejected earlier.
 - **Policy starvation.** The `max_wait` floor guarantees progress for
