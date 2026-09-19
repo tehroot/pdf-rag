@@ -165,7 +165,12 @@ public class Embedder {
         try {
             resp = http.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
         } catch (IOException e) {
-            throw new IngestException("I/O error calling embeddings endpoint at " + baseUrl, e);
+            // Name the cause: a request timeout (HttpTimeoutException) under
+            // embedder queueing looked identical to a dead endpoint in the
+            // job record (211 DTIC files, 2026-09-18).
+            throw new IngestException("I/O error calling embeddings endpoint at " + baseUrl
+                    + " (" + e.getClass().getSimpleName()
+                    + (e.getMessage() != null ? ": " + e.getMessage() : "") + ")", e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IngestException("Interrupted calling embeddings endpoint", e);

@@ -207,6 +207,10 @@ services:
       # of 128-260 MB (2026-09-18); raise it on hosts with the heap for them
       # (a worker holds the file, its page images and its vectors at once).
       INGEST_MAX_FILE_BYTES: ${INGEST_MAX_FILE_BYTES:-104857600}
+      # Per-request cap on the text embedder call. One request is a batch of
+      # chunks; with many text threads queued on llama-server's slots the
+      # wait at the tail of a long document passes 120 s (R530, 2026-09-19).
+      INGEST_EMBED_REQUEST_TIMEOUT_SECONDS: ${INGEST_EMBED_REQUEST_TIMEOUT_SECONDS:-120}
 
       # Page-image storage (rendered PNGs for inspect_page)
       INGEST_PAGE_STORE_ROOT: /var/lib/pdf-rag-ingest/page-images
