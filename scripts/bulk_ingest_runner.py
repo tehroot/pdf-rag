@@ -7,9 +7,12 @@ once, and keeps going until every file is accounted for. What "accounted
 for" means is read from the live system, not from local state, so the
 runner can be killed and restarted at any time:
 
-  a file is done when it has chunk points in the <kb> collection, OR page
-  points in <kb>_pages (a scanned PDF with no text layer), OR a visual job
-  queued / in progress (submitted, pages not yet embedded).
+  a file is done when it has page points in <kb>_pages, OR a visual job
+  queued / in progress (submitted, pages not yet embedded). Chunk points
+  alone do NOT count: the text side is written before the visual job runs,
+  so "has chunks" also describes a document whose visual job failed for
+  good (24 DTIC files were missed that way on 2026-09-19). For a knowledge
+  base with the visual index off, pass --text-only and chunks are the test.
 
 Each batch is staged as a directory of relative symlinks under --stage,
 named uniquely per batch (a reused directory would re-ingest its previous
@@ -59,6 +62,7 @@ ap.add_argument("--max-time", type=int, default=1700, help="client cap per batch
 ap.add_argument("--skip-after", type=int, default=2, help="skip a file after this many error responses")
 ap.add_argument("--metadata", default="{}", help="JSON object merged into every page/chunk payload")
 ap.add_argument("--wait-for-process", default="", help="pgrep -f pattern; while it runs, keep looping for new files instead of exiting")
+ap.add_argument("--text-only", action="store_true", help="the KB has no visual index: a file is done when it has chunk points (default: page points)")
 a = ap.parse_args()
 
 BASE, QD, KB = a.base, a.qdrant, a.kb
@@ -99,11 +103,12 @@ def _scroll_filenames(collection):
         if offset is None: return names
 
 def ingested_filenames():
-    """A file is handled when it has text chunks, OR page vectors (scanned
-    PDF: zero chunks, visual side only), OR a visual job queued/in progress
-    (submitted, pages not yet embedded). Chunks alone re-submitted every
-    scanned document each loop once the server started accepting them."""
-    names = _scroll_filenames(KB) | _scroll_filenames(f"{KB}_pages")
+    """A file is handled when it has page vectors (the visual side is the
+    last to be written), OR a visual job queued/in progress. Chunks alone
+    are not enough on a visual KB: a document whose visual job failed
+    terminally still has them. With --text-only (visual index off) chunks
+    are the only evidence there is."""
+    names = _scroll_filenames(KB) if args.text_only else _scroll_filenames(f"{KB}_pages")
     for st in ("queued", "in_progress"):
         try:
             for j in http("GET", f"{BASE}/ingest/jobs?status={st}", timeout=120)["jobs"]:
