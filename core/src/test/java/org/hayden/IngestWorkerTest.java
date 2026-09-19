@@ -105,6 +105,20 @@ class IngestWorkerTest {
     }
 
     @Test
+    void processOne_outOfMemory_marksFailed_notOrphaned() {
+        IngestJob job = queue.submit(IngestJob.queued(req("kb"), "doc-1"));
+        IngestJob taken = takeOrFail();
+
+        fake.nextError = new OutOfMemoryError("Java heap space");
+        boolean transientFailure = worker.processOne(taken);
+
+        assertThat(transientFailure).isFalse();
+        IngestJob failed = queue.getJob(job.jobId()).orElseThrow();
+        assertThat(failed.status()).isEqualTo(JobStatus.FAILED);
+        assertThat(failed.error()).contains("heap");
+    }
+
+    @Test
     void processOne_sidecarUnavailable_requeuesWithoutRetryPenalty() {
         IngestJob job = queue.submit(IngestJob.queuedVisual(req("kb"), "doc-1"));
         IngestJob taken = takeOrFail();
@@ -232,6 +246,7 @@ class IngestWorkerTest {
     static class FakeBackend extends QdrantBackend {
         IngestResult nextResult;
         RuntimeException nextException;
+        Error nextError;
         final AtomicInteger calls = new AtomicInteger();
         final AtomicReference<IngestJob> lastJob = new AtomicReference<>();
 
@@ -239,6 +254,7 @@ class IngestWorkerTest {
         public IngestResult ingestForWorker(IngestJob job) {
             calls.incrementAndGet();
             lastJob.set(job);
+            if (nextError != null) throw nextError;
             if (nextException != null) throw nextException;
             return nextResult;
         }

@@ -141,7 +141,11 @@ public class Embedder {
     private Attempt requestEmbeddings(List<String> batch) {
         byte[] body;
         try {
-            body = objectMapper.writeValueAsBytes(new EmbedRequest(model, batch));
+            List<String> clean = new ArrayList<>(batch.size());
+            for (String input : batch) {
+                clean.add(stripUnpairedSurrogates(input));
+            }
+            body = objectMapper.writeValueAsBytes(new EmbedRequest(model, clean));
         } catch (IOException e) {
             throw new IngestException("Failed to serialize embedding request", e);
         }
@@ -213,6 +217,36 @@ public class Embedder {
             out[i] = in.get(i).floatValue();
         }
         return out;
+    }
+
+    /**
+     * Replace each unpaired UTF-16 surrogate with U+FFFD. llama-server's JSON
+     * parser rejects a lone surrogate with HTTP 500 ("surrogate U+D800..U+DBFF
+     * must be followed by U+DC00..U+DFFF"); PDFBox emits them from broken font
+     * encodings (30 DTIC files, 2026-09-18). Only the embedding input is
+     * cleaned; the stored chunk text is untouched. Returns the same instance
+     * when nothing needs replacing.
+     */
+    public static String stripUnpairedSurrogates(String s) {
+        StringBuilder sb = null;
+        int n = s.length();
+        for (int i = 0; i < n; i++) {
+            char c = s.charAt(i);
+            if (Character.isHighSurrogate(c) && i + 1 < n && Character.isLowSurrogate(s.charAt(i + 1))) {
+                if (sb != null) {
+                    sb.append(c).append(s.charAt(i + 1));
+                }
+                i++;
+            } else if (Character.isSurrogate(c)) {
+                if (sb == null) {
+                    sb = new StringBuilder(n).append(s, 0, i);
+                }
+                sb.append('\uFFFD');
+            } else if (sb != null) {
+                sb.append(c);
+            }
+        }
+        return sb == null ? s : sb.toString();
     }
 
     private static String stripTrailingSlash(String s) {

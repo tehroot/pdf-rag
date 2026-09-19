@@ -72,6 +72,29 @@ class EmbedderTest {
     }
 
     @Test
+    void stripUnpairedSurrogates_replacesLoneOnes_keepsPairs() {
+        String pair = "a\uD83D\uDE00b";                       // valid pair (😀)
+        assertThat(Embedder.stripUnpairedSurrogates(pair)).isSameAs(pair);
+        assertThat(Embedder.stripUnpairedSurrogates("x\uD800y")).isEqualTo("x\uFFFDy");
+        assertThat(Embedder.stripUnpairedSurrogates("x\uDC00")).isEqualTo("x\uFFFD");
+        assertThat(Embedder.stripUnpairedSurrogates("\uD800\uD83D\uDE00")).isEqualTo("\uFFFD\uD83D\uDE00");
+        assertThat(Embedder.stripUnpairedSurrogates("plain")).isSameAs("plain");
+    }
+
+    @Test
+    void embed_loneSurrogate_isCleanedBeforeSerialization() {
+        server.stubFor(post(urlEqualTo("/v1/embeddings"))
+                .withRequestBody(matchingJsonPath("$.input[0]", equalTo("x\uFFFDy")))
+                .willReturn(aResponse().withStatus(200)
+                        .withHeader("Content-Type", "application/json")
+                        .withBody("{\"data\":[{\"embedding\":[1.0]}]}")));
+
+        List<float[]> out = embedder.embed(List.of("x\uD800y"));
+
+        assertThat(out).hasSize(1);
+    }
+
+    @Test
     void embed_emptyList_returnsEmpty_withoutCallingHttp() {
         List<float[]> out = embedder.embed(List.of());
         assertThat(out).isEmpty();

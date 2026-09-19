@@ -182,6 +182,20 @@ public class IngestWorker {
             queue.markFailed(job.jobId(), message);
             releaseSnapshot(job.jobId());   // FAILED is terminal here
             return false;
+        } catch (OutOfMemoryError e) {
+            // An Error escapes the Exception branch above, and the loop's
+            // catch (Throwable) only logs it: the job file stayed IN_PROGRESS
+            // forever, no worker retried it, and the bulk runner counted it
+            // as done (3 long documents, R530, 2026-09-18). By the time this
+            // runs the pipeline's buffers are unreachable and the heap is
+            // usable again, so record the failure and keep the worker.
+            // Only OOM: other Errors are code faults and still go to the loop.
+            String message = "Java heap space exhausted while ingesting (document too large"
+                    + " for the configured heap and worker count)";
+            LOG.errorf("Worker failed job=%s: %s", job.jobId(), message);
+            queue.markFailed(job.jobId(), message);
+            releaseSnapshot(job.jobId());
+            return false;
         }
     }
 

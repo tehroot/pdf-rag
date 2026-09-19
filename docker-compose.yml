@@ -203,6 +203,10 @@ services:
       INGEST_ASYNC_THRESHOLD_PAGES: ${INGEST_ASYNC_THRESHOLD_PAGES:-5}
       INGEST_QUEUE_WORKERS: ${INGEST_QUEUE_WORKERS:-1}
       INGEST_QUEUE_PATH: /var/lib/pdf-rag-ingest/queue
+      # Cap per fetched file (bytes). 100 MB rejected 37 scanned DTIC reports
+      # of 128-260 MB (2026-09-18); raise it on hosts with the heap for them
+      # (a worker holds the file, its page images and its vectors at once).
+      INGEST_MAX_FILE_BYTES: ${INGEST_MAX_FILE_BYTES:-104857600}
 
       # Page-image storage (rendered PNGs for inspect_page)
       INGEST_PAGE_STORE_ROOT: /var/lib/pdf-rag-ingest/page-images
