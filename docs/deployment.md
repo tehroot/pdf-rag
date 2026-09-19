@@ -412,7 +412,25 @@ replicas), 2026-09-18:
 | `LLAMA_PARALLEL` | 8 (GPU override default) | 12 text threads on 4 slots queued on the embedder: 2.8 files/min; 8 slots: ~31 files/min |
 | `INGEST_QUEUE_WORKERS` | 20 | keeps ~2 embed requests in flight per sidecar replica |
 | `PDF_RAG_JAVA_TOOL_OPTIONS` | `-Xmx48g` | ~1-2 GB per worker on long documents |
+| `INGEST_MAX_FILE_BYTES` | 419430400 | scanned reports reach 372 MB; the 100 MB default rejected 37 |
+| `INGEST_EMBED_REQUEST_TIMEOUT_SECONDS` | 600 | 12 text threads on 8 slots: a batch at the tail of a long document waits past 120 s |
+| `COMPOSE_FILE` in `.env` | `docker-compose.yml:docker-compose.gpu.yml:docker-compose.pool.yml` | a recreate without the pool file silently points the service at the single local sidecar |
 | `indexing_threshold` on `<kb>_pages` | raised for the load, restored after | see the throughput plan |
+
+Long scanned documents still overflow a 48 GB heap when twenty of them
+are in flight at once (each worker holds a document's vectors until the
+last batch). Such a job now ends as `failed` with "Java heap space
+exhausted"; re-run those files with `INGEST_QUEUE_WORKERS` at 4-6 (a
+recreate is safe while the queue is idle). The structural fix is step 3
+of [plans/ingest-planner-v1.md](plans/ingest-planner-v1.md).
+
+After a load, audit before declaring it complete: for the KB, list
+failed jobs whose file has no later completed job, then count points by
+`filename` in `<kb>` and `<kb>_pages` (`POST .../points/count` with
+`exact: true`). A file with chunks and zero pages had its visual job fail
+for good; re-submit it through `/ingest/directory` (replace semantics
+rewrite both sides). The runner keys "done" on page points for this
+reason; `--text-only` keeps the chunk test for KBs without a visual index.
 
 Two things the runner protects against, learned the hard way: a staging
 directory reused across runs re-ingests its old contents (replace

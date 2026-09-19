@@ -245,6 +245,17 @@ leaking a batch.
 Touch points: `IngestResource`, `KnowledgeBaseResource`, `QdrantClient`
 (collection PATCH), a `StageCostModel` bean.
 
+## Observations from the load's tail (2026-09-19), mapped to steps
+
+| Observed | Cause | Step that removes it |
+|---|---|---|
+| 3 jobs stuck `IN_PROGRESS` for a day, no pages written | `OutOfMemoryError` escaped the worker's `catch (Exception)`; now recorded as failed (a328091) | 3 (bounded memory) and 4 (backpressure) |
+| 24 files reported complete with text and no pages | the runner's "done" test accepted chunks alone | 0 (`present` means both sides, or a terminal job) |
+| a pass ran a whole hour on one GPU while eight idled | a recreate without the pool compose file | 5 (`/ingest/stats` shows per-replica embed latency; the plan's estimate would have flagged 7 s/page) |
+| "sidecar unreachable" at submit while eight replicas idle | the balancer's health probe targets the local replica with a 1 s timeout | 4 (the embed pool owns replica health, admission does not probe a single upstream) |
+| 5 files failed on a masked 120 s embedder timeout | one request per chunk batch, twelve threads on eight slots | 4 (bounded embed queue sized from slot count) |
+| 39 files failed on lone UTF-16 surrogates in two different parsers | PDFBox output and a window that splits pairs (fixed at extraction and payload, ea33775, 6426e69) | none needed; noted because step 1's hash must be taken on bytes, not text |
+
 ## Data model changes, compatibility
 
 | Change | Backward compatible? |
