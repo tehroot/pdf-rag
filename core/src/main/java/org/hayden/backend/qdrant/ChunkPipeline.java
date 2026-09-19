@@ -7,6 +7,7 @@ import org.hayden.backend.KnowledgeBaseSummary;
 import org.jboss.logging.Logger;
 import org.hayden.ingest.FetchedFile;
 import org.hayden.ingest.IngestException;
+import org.hayden.ingest.TextSanitizer;
 import org.hayden.ingest.IngestRequest;
 import org.hayden.ingest.IngestResult;
 import org.hayden.ingest.PageText;
@@ -273,7 +274,11 @@ public class ChunkPipeline {
                                                     Map<String, Object> userMeta,
                                                     String embedModel) {
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("text", c.text());
+        // The sliding window cuts on char offsets and can split a surrogate
+        // pair across two chunks; Qdrant rejects the halves ("lone leading
+        // surrogate", 19 DTIC files, 2026-09-19). Extraction-time cleanup
+        // cannot see that, so clean the stored text here as well.
+        payload.put("text", TextSanitizer.stripUnpairedSurrogates(c.text()));
         payload.put("doc_id", docId);
         payload.put("chunk_index", c.index());
         payload.put("page_start", c.pageStart());
