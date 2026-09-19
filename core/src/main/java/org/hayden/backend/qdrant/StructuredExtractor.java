@@ -5,6 +5,7 @@ import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.hayden.ingest.TextSanitizer;
 import org.apache.pdfbox.text.TextPosition;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.metadata.Metadata;
@@ -323,7 +324,8 @@ public class StructuredExtractor {
 
         private void flushLine() {
             // Keep blank lines: the grouper uses them as paragraph separators.
-            lines.add(new Line(cur.toString().strip(), curSize, curBold, getCurrentPageNo()));
+            lines.add(new Line(TextSanitizer.stripUnpairedSurrogates(cur.toString().strip()),
+                    curSize, curBold, getCurrentPageNo()));
             cur.setLength(0);
             curSize = 0;
             curBold = false;

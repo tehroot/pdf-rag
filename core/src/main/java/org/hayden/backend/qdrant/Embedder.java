@@ -8,6 +8,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.hayden.ingest.IngestException;
+import org.hayden.ingest.TextSanitizer;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -219,34 +220,10 @@ public class Embedder {
         return out;
     }
 
-    /**
-     * Replace each unpaired UTF-16 surrogate with U+FFFD. llama-server's JSON
-     * parser rejects a lone surrogate with HTTP 500 ("surrogate U+D800..U+DBFF
-     * must be followed by U+DC00..U+DFFF"); PDFBox emits them from broken font
-     * encodings (30 DTIC files, 2026-09-18). Only the embedding input is
-     * cleaned; the stored chunk text is untouched. Returns the same instance
-     * when nothing needs replacing.
-     */
+    /** Belt and braces: extraction already cleans PDFBox text ({@link TextSanitizer});
+     *  this covers inputs that arrive by other routes (queries, tests). */
     public static String stripUnpairedSurrogates(String s) {
-        StringBuilder sb = null;
-        int n = s.length();
-        for (int i = 0; i < n; i++) {
-            char c = s.charAt(i);
-            if (Character.isHighSurrogate(c) && i + 1 < n && Character.isLowSurrogate(s.charAt(i + 1))) {
-                if (sb != null) {
-                    sb.append(c).append(s.charAt(i + 1));
-                }
-                i++;
-            } else if (Character.isSurrogate(c)) {
-                if (sb == null) {
-                    sb = new StringBuilder(n).append(s, 0, i);
-                }
-                sb.append('\uFFFD');
-            } else if (sb != null) {
-                sb.append(c);
-            }
-        }
-        return sb == null ? s : sb.toString();
+        return TextSanitizer.stripUnpairedSurrogates(s);
     }
 
     private static String stripTrailingSlash(String s) {

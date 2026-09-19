@@ -4,6 +4,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.hayden.ingest.TextSanitizer;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
@@ -96,7 +97,7 @@ public class TextExtractor {
                 PDFTextStripper stripper = new PDFTextStripper();
                 stripper.setStartPage(i);
                 stripper.setEndPage(i);
-                String pageText = stripper.getText(doc);
+                String pageText = TextSanitizer.stripUnpairedSurrogates(stripper.getText(doc));
                 extractedBytes += pageText == null ? 0 : pageText.length();
                 if (extractedBytes > maxChars) {
                     // Hard cap matches Tika's BodyContentHandler behavior.
