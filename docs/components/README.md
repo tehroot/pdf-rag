@@ -136,3 +136,4 @@ For the planned lexical (BM25/sparse) + dense hybrid on the text side, see
 [../plans/lexical-bm25-hybrid-classic-v1.md](../plans/lexical-bm25-hybrid-classic-v1.md)
 (client-side BM25, no new infra) and its learned-sparse follow-on
 [../plans/lexical-bm25-hybrid-neu-v1.md](../plans/lexical-bm25-hybrid-neu-v1.md).
+- [qdrant-segments-and-hnsw.md](qdrant-segments-and-hnsw.md) — segments, per-segment HNSW, storage tiers, ZFS caching, the DTIC measurements and consolidation plan.

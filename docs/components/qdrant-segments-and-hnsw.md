@@ -1,0 +1,275 @@
+# Qdrant segments, HNSW graphs, and where the vectors live
+
+What a segment is, why the number of segments sets search speed, how the
+graphs relate to them, and which storage tier each kind of vector sits
+in. Written from the `dtic_archive` load on the R530 (2026-09-16 to 20),
+where a 934k-page collection ended up in 1,150 segments and visual search
+took minutes per query. The numbers in this document are from that host.
+
+## 1. Segments
+
+A segment is the unit Qdrant stores and searches. Each one is a
+self-contained directory with its own vector files, its own HNSW graph
+per named vector, its own payload store and its own id tracker. A
+collection is a list of segments, and a query runs against every one of
+them, then merges the per-segment results.
+
+On disk:
+
+```
+/tank/qdrant/collections/dtic_archive_pages/
+  0/                                 shard 0 (single node: one shard)
+    segments/
+      30b771bc-…/                    one segment (~900 pages here)
+        segment.json                 vector names, distances, storage types
+        id_tracker.mappings          point UUID <-> internal offset
+        id_tracker.versions          per-point version (upsert conflicts)
+        id_tracker.deleted           deletion bitmap
+        vector_storage-original/
+          vectors/chunk_0..40.mmap   f32 rows, 33.6 MB per chunk file
+          offsets/chunk_0.mmap       per point: first row, row count
+          quantized.data             binary-quantized copy (loaded to RAM)
+          deleted/flags_a.dat
+        vector_storage-pooled_rows/  same layout, 1-2 chunks
+        vector_storage-pooled_cols/
+        vector_index-original/       hnsw_config.json only (m = 0: no graph)
+        vector_index-pooled_rows/    graph.bin + links_compressed.bin
+        vector_index-pooled_cols/
+        payload_storage/page_0.dat   payload pages (on_disk_payload)
+        payload_index/               RocksDB: doc_id and filename indexes
+      dc0bc0e0-…/                    next segment, same shape
+```
+
+### How points land in a segment
+
+A shard has one or more *appendable* segments that accept writes. An
+upsert goes to one of them. When an appendable segment passes
+`indexing_threshold` (or `max_segment_size`), the optimizer freezes it
+into an *indexed* segment: vectors are rewritten as mmap chunk files, the
+graph is built, the quantized copy is made, and a fresh appendable
+segment is opened.
+
+A point lives in exactly one segment. An update to a point that sits in a
+frozen segment writes the new version into an appendable segment and
+marks the old copy deleted; the version file decides which copy is live.
+
+### How segments relate to each other
+
+They do not. There is no ordering, range or key partition between
+segments. The same document's pages can sit in dozens of them, whichever
+segment was appendable when each batch arrived. A query cannot skip any
+segment, and a payload filter on `doc_id` still visits every segment's
+payload index.
+
+### What the optimizer does with them
+
+Three kinds of rewrite, each producing a new segment that is swapped in
+atomically while the old one keeps serving reads:
+
+| Operation | Trigger | Result |
+|---|---|---|
+| indexing | appendable segment passes `indexing_threshold` | frozen, indexed segment |
+| vacuum | deleted fraction passes `deleted_threshold` (0.2) | rewritten without the deleted points |
+| merge | more segments than `default_segment_number`, candidates below `max_segment_size` | several small segments become one |
+
+A proxy captures writes during a rewrite, so nothing goes offline. This
+is also why a consolidation pass can run under live search.
+
+### Why the DTIC collection has 1,150 segments
+
+Graph building was suspended for the bulk load (`indexing_threshold`
+raised to 100 M), and upserts streamed in for two days. Qdrant kept
+freezing small segments of about 900 pages and never merged them:
+`max_segment_size` was on auto, which is sized for indexing speed, so a
+merge into large segments was never a legal move, and `default_segment_number`
+0 (auto) gave no target to merge toward.
+
+## 2. HNSW graphs are per segment
+
+An HNSW graph is built per segment, never per collection.
+
+**Construction.** When a segment is frozen, Qdrant builds one graph for
+each named vector over that segment's points only. Nodes are the
+segment's internal offsets; links point only inside the segment. That is
+what lets the graph be immutable and stored as a flat link file. A
+segment of 900 points has a graph of about 25 KB.
+
+**Search.** A query runs the HNSW search independently in every segment:
+enter at the top layer, descend greedily, expand `ef` candidates at the
+bottom, return the segment's top-k. Qdrant merges the lists. Nothing
+links one segment's graph to another, so no segment can be skipped and
+no work is shared.
+
+**Why segment size sets index quality.** HNSW's advantage is logarithmic:
+a search over N points visits on the order of log N × ef nodes. That
+pays off at N in the hundreds of thousands. Over 900 points the search
+visits a large fraction of the segment, so the index does close to a
+brute-force scan, 1,150 times per query. Eight segments of about 117k
+pages give graphs with real layers and roughly two orders of magnitude
+fewer visited nodes.
+
+**Multivectors.** For `pooled_rows` and `pooled_cols` a node is a page's
+32-row multivector and the distance is MaxSim over all rows. Every
+visited node reads a 41 KB block and does 32 dot products per query row.
+Fewer visited nodes means proportionally fewer blocks read; that is the
+disk volume per query.
+
+**Parameters.** `m`, `ef_construct` and `full_scan_threshold` apply to
+each segment's graph. `full_scan_threshold` (10,000 KB) makes a segment
+whose vector data is below it use brute force instead of its graph; the
+DTIC segments are above it, so they do have graphs, just tiny ones.
+
+**A merge does not stitch graphs.** It copies the points into a new
+segment and builds a new graph from scratch. That is the expensive part
+of consolidation, and also the part that makes the index useful.
+
+## 3. Where each vector lives
+
+Three tiers, chosen per named vector in the collection config:
+
+| Tier | Config | What it means |
+|---|---|---|
+| "in memory" (default) | `on_disk: false` | still mmap chunk files on disk; Qdrant expects them resident in the page cache |
+| on disk | `on_disk: true` | same files, read on demand through the page cache; nothing loaded at start |
+| quantized, always in RAM | `quantization_config` with `always_ram: true` | a compact copy (binary 32×, int8 4× smaller) held in anonymous memory; the f32 copy is read only to rescore final candidates |
+
+The HNSW graph itself is a mapped file too (`hnsw_config.on_disk` false
+means expected resident, not loaded).
+
+The page cache is the read cache. Qdrant has no bounded vector cache of
+its own, so the effective cache is whatever RAM the kernel can spare.
+
+### Sizes on the DTIC collection
+
+| Data | Size |
+|---|---|
+| f32 pooled vectors, real, both names | 77 GB |
+| same as chunk files on disk (1,150 segments, preallocated 33.6 MB chunks) | 140 GB apparent |
+| offset tables for those files | 78 GB apparent |
+| binary-quantized `original`, pinned in RAM | about 60 GB |
+| f32 `original` rows on disk | 1.87 TB |
+| text collection (`dtic_archive`, 2 M chunks, 8 segments) | 5 GB |
+| host RAM | 188 GB |
+
+The preallocation waste comes from tiny segments: a 900-page segment
+fills its `pooled_rows` chunk to 37 MB, so it gets two files (67 MB),
+and its offsets file is 33.6 MB for a table of a few kilobytes.
+
+## 4. ZFS: ARC, page cache, and L2ARC
+
+On ZFS a memory-mapped file is cached twice: once in the ARC (ZFS's own
+read cache in kernel memory) and once in the Linux page cache that mmap
+uses. The ARC gives memory back only slowly under pressure. On the R530
+the ARC was capped at 64 GiB with a 63 GiB *floor* in
+`/etc/modprobe.d/zfs.conf`, so with Qdrant at 107 GB resident the page
+cache had about 1 GB, and every query re-read its files from the
+mirrors.
+
+Rules that follow:
+
+- Cap the ARC (`zfs_arc_max`) so the page cache has room, and check
+  `zfs_arc_min` too: the cap cannot go below the floor. Both are runtime
+  writable under `/sys/module/zfs/parameters/`, but the ARC only evicts
+  under memory pressure, so the size does not fall until something asks
+  for memory.
+- A plain `cat` of a file fills the ARC, not the page cache. It does not
+  warm mmap access. Faulting the pages through mmap does, but only if
+  they fit alongside everything else.
+- L2ARC on an NVMe device is the durable fix for a spinning pool: the
+  data's only home stays the mirrors, the cache device holds the hot set,
+  and losing the device loses nothing. It persists across reboots and
+  Qdrant restarts. It fills only from ARC eviction, throttled by
+  `l2arc_write_max`, and by default excludes prefetched (sequential)
+  reads (`l2arc_noprefetch=1`). A deliberate warm-up is a sequential read
+  of the hot files with `l2arc_noprefetch=0` and a raised feed rate, then
+  restore `l2arc_noprefetch=1`.
+
+## 5. What was measured
+
+All queries: one random 320-d row against `pooled_rows`, `hnsw_ef` 16,
+limit 5, unless noted. Mirrors: two ZFS mirrors of 9.1 TB spinning
+disks. Random reads from them ran at about 12 MB/s.
+
+| Condition | Time | Disk read |
+|---|---|---|
+| ARC at 64 GiB, page cache ~1 GB, text collection HNSW (ef 64) | 18-25 s | 180-200 MB per query, every query |
+| after ARC cap, text collection: one exact scan (2.7 GB), then HNSW | 11 s, then 1.1 s | 2.7 GB, then 0 |
+| exact scan on binary-quantized `original` (in RAM) | 1.9 s | 0 |
+| pooled HNSW, cold | timeout at 300 s | 3.5 GB |
+| pooled HNSW, six consecutive queries | 227, 173, 126, 86, 68, 52 s | 2.8 → 0.6 GB |
+| pooled HNSW after mmap-faulting all 70 GB of `pooled_rows` chunk files | 119, 94, 85 s | 1.3 → 0.9 GB (offsets and other files still cold; cache full) |
+| sequential read of 120 `original` chunk files, cold | 77 MB/s | files fragmented by the concurrent load |
+
+Reading: time tracks disk bytes at the mirrors' random-read rate.
+Nothing in the compute path is slow. The text collection, with 8
+segments, is fast once its 3 GB working set is cached. The pages
+collection cannot be made resident at 1,150 segments because the
+preallocated files (218 GB apparent for the pooled side alone) exceed
+RAM, and each query touches every segment.
+
+## 6. The consolidation plan
+
+Applied as one `PATCH` on the live collection:
+
+```json
+{
+  "optimizers_config": {"default_segment_number": 8, "max_segment_size": 300000000},
+  "vectors": {"pooled_rows": {"on_disk": true}, "pooled_cols": {"on_disk": true}}
+}
+```
+
+`max_segment_size` is in KB (300 GB), sized for 934k pages of originals
+per segment. `on_disk: true` on the pooled vectors makes Qdrant read them
+on demand through the cache rather than expect them resident. FP32 is
+kept; int8 scalar quantization with `always_ram` remains a later, online
+`PATCH` if measured latency calls for it.
+
+The optimizer merges a few segments per operation, so the segment count
+falls gradually and search stays available. That also means the curve of
+speed against segment count comes from a single pass: sample a fixed
+query set as the count passes 512, 128, 32 and 8.
+
+**Recall measurement.** Segment count does not change the vectors; what
+can change is HNSW recall (a 117k-point graph is approximate, a 900-point
+one is near exact). Embed 50 real queries once, compute ground truth once
+with `exact: true` on `pooled_rows` (top 100), and at each checkpoint
+record HNSW time and overlap with the ground truth at the production
+`ef`. Expect recall in the high 0.9s at 8 segments, tunable with
+`hnsw_ef` at linear time cost.
+
+**Where the pass runs.** In place on the mirrors, the rewrite reads the
+fragmented layout three times (about 1,150 → 100 → 10 → 8) at 77 MB/s
+while writing to the same spindles: a day or more. The alternative taken
+on 2026-09-20: `zfs send` the dataset (its own dataset, `tank/qdrant`) to
+a temporary pool on the two NVMe devices at about 300 MB/s (2 h), run the
+pass there (hours), `zfs send` the 8-segment result back to a new dataset
+on the mirrors as one sequential write (2 h), swap datasets, return the
+EVO to its L2ARC role and warm it. The old dataset stays as the fallback
+until the new one is verified. Cost: Qdrant stopped for the two copies.
+Benefit beyond time: the collection lands on the mirrors defragmented.
+
+**The rerank step on spinning disks.** The service's visual search
+prefetches 10 × top_k candidates from each pooled vector, then reranks on
+`original`. Qdrant's default for a quantized vector rescores from the
+f32 copy on disk: about 100 candidates × 1.6 MB of random reads, 13 s
+cold on the mirrors, about 1 s from L2ARC. This step does not shrink with
+consolidation. It can be switched off per query (`rescore: false`), at a
+recall cost on MaxSim not yet measured.
+
+## 7. Operating rules
+
+- Keep graph building enabled during a load unless the load is short:
+  segments then merge as they go. If it must be suspended, plan the
+  consolidation pass as part of the load, not as an afterthought.
+- Set `default_segment_number` and `max_segment_size` explicitly for a
+  large collection; the auto values never merge into large segments.
+- Size RAM for the resident set: quantized copies with `always_ram`,
+  plus the page cache the pooled vectors and graphs need, plus the ARC,
+  plus the ingest JVM heap during loads.
+- Check `zfs_arc_min` as well as `zfs_arc_max` when capping the ARC.
+- Use exact counts (`POST /collections/<c>/points/count` with
+  `exact: true`) and per-segment telemetry (`/telemetry?details_level=4`)
+  rather than the collection info counters, which are approximate and
+  count named vectors, not points.
+- A query timing on its own says little; record disk bytes per query
+  (`/proc/diskstats`) alongside it to tell I/O-bound from CPU-bound.
