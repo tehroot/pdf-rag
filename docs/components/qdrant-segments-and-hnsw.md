@@ -275,7 +275,120 @@ recall cost on MaxSim not yet measured.
   to 1 below a free-space floor is worth having on a pool without much
   headroom.
 
-## 7. Operating rules
+## 7. What was done, step by step (2026-09-20 to 21)
+
+The sequence as executed on the R530, with the numbers observed at each
+step. Section 6 has the reasoning; this is the record.
+
+### 8.1 Diagnosis (2026-09-19 to 20)
+
+1. After the load, `indexing_threshold` was restored to 20,000 and the
+   graphs built (about 12 hours). The collection turned green, but a
+   visual query still timed out at 300 s and a text query took 18 to
+   25 s.
+2. Measuring disk bytes per query alongside time showed both collections
+   were I/O-bound: 180 to 200 MB per text query, 3.5 GB per pooled query,
+   served from the mirrors at about 12 MB/s random. Repeating a query
+   answered from Qdrant's query cache in 0.01 s, which ruled out compute.
+3. The host had 1 GB of page cache: Qdrant at 107 GB resident, the ZFS
+   ARC pinned at 64 GiB by an explicit `zfs_arc_min` in
+   `/etc/modprobe.d/zfs.conf`.
+4. The ARC was capped to 24 GiB at runtime (the floor had to be lowered
+   first, then memory pressure applied, since the ARC only evicts on
+   demand). Text search dropped to about 1 s once its 3 GB working set
+   had been read once. The pages collection did not improve: its
+   preallocated chunk files (218 GB apparent for the pooled side, 1,150
+   segments) exceeded what could be cached, and every query touched every
+   segment. An mmap warm-up of the 70 GB of `pooled_rows` files did not
+   help either, because the offsets files and the rest of the per-segment
+   set stayed cold.
+5. Per-segment telemetry (`/telemetry?details_level=4`) confirmed all
+   1,150 segments had graphs; the file listing showed each graph was 21 to
+   28 KB. The cost was fan-out, not missing indexes.
+
+### 8.2 Storage moves
+
+6. The Samsung 970 EVO Plus 2 TB, which held a Windows system volume, was
+   emptied: `Users` (162 GB) and `backup_files` (401 GB) were copied to a
+   new dataset `tank/evo-backup` (rsync, dry-run diff of zero afterwards),
+   then the user wiped the drive.
+7. Of the two ADATA 1 TB drives, one had 7,691 media errors in a single
+   region (SMART and a `badblocks` read scan agreed) and was excluded. The
+   other was clean.
+8. The EVO was first attached to `tank` as an L2ARC cache device. That
+   remains the intended end state. It was detached again for the
+   consolidation, because the pass runs far faster on NVMe than on the
+   fragmented mirrors (a cold sequential read of the original chunk files
+   ran at 77 MB/s).
+9. Pool `nvme` was created from the EVO and the healthy ADATA (striped,
+   2.74 TB, no redundancy). `tank/qdrant` was snapshotted as
+   `@pre-consolidation` and sent with `zfs send -c` at about 300 MB/s
+   (1.78 TB in 1 h 42 min), Qdrant and the ingest service stopped for the
+   duration. `QDRANT_DATA_DIR` was pointed at `/nvme/qdrant` and Qdrant
+   restarted there. Counts matched (934,834 pages, 2,012,201 chunks) after
+   one partial duplicate resurrected by WAL replay was deleted again.
+
+### 8.3 The consolidation pass
+
+10. Baseline on NVMe, still 1,152 segments: pooled query 7 s cold, 3 s
+    warm; text 0.7 s. A 50-query benchmark set was embedded once through
+    the sidecar, and exact top-100 ground truth computed for both pooled
+    vectors (15 s per scan on NVMe, 20 minutes in total).
+11. `PATCH`: `default_segment_number` 8, `max_segment_size` 300 GB,
+    pooled vectors `on_disk: true`. The optimizer started five merges at
+    once toward the 300 GB cap and consumed 480 GB of temp space in 35
+    minutes against 540 GB free. A second `PATCH` (1 thread, 100 GB cap)
+    cancelled them and returned the space.
+12. Settled at 4 threads, then 5, at the 100 GB cap. A systemd unit on the
+    host logged free space and segment count every minute and would have
+    dropped the thread count to 1 below 250 GB free; it never fired. A
+    second unit sampled query latency every ten minutes.
+13. Rounds landed as batches: 1,152 → 842 → 575 → 448 → 386 → 325 → 205 →
+    86 → 27 → 18, from 21:45 to 04:36 EDT. Each round of four or five
+    merges took about 65 minutes, most of it graph construction. Raising
+    the thread count mid-round cancelled the merges in flight once more
+    (the `PATCH` blocked for 502 s while they stopped), which is the origin
+    of the rule in section 8.
+14. Result: 18 segments of 79 to 99 GB, green, counts unchanged, 1.13 TB
+    free on the NVMe pool.
+
+### 8.4 Measurements at 18 segments
+
+Real 50 queries, top 100, against exact ground truth; optimizer idle:
+
+| `ef` | `pooled_rows` p50 / p90 | recall@100 | `pooled_cols` p50 / p90 | recall@100 |
+|---|---|---|---|---|
+| 32 | 0.05 / 0.07 s | 0.886 | 0.05 / 0.09 s | 0.913 |
+| 100 (service default) | 0.26 / 0.40 s | 0.969 | 0.56 / 1.82 s | 0.981 |
+| 256 | 0.25 / 0.33 s | 0.991 | 0.31 / 0.49 s | 0.995 |
+| 512 | 0.44 / 0.51 s | 0.996 | 0.39 / 0.46 s | 0.997 |
+| 1,152 segments, ef 100 (baseline) | 5.7 / 7.6 s | 0.9994 | 6.4 / 8.2 s | 0.9988 |
+
+Consolidation bought about 20× on latency and cost about 3 percent of
+recall at the default `ef`; `ef` 256 recovers it at no latency cost. The
+end-to-end `colpali_only` search through the service, which had timed
+out for two days, returns in about a second. An exact scan takes 6 s.
+
+The random-vector sampler, once the optimizer went idle, read 0.1 s per
+pooled query and 0.09 s per text query.
+
+### 8.5 Open at the time of writing
+
+- Whether to merge 18 → 8. The data says 18 is past the knee; 8 halves
+  the fan-out for perhaps 0.1 s at p50, costs three to four more hours,
+  and leaves 300 GB segments that make future merges heavier. The
+  recommendation is to stop at 18 and set `default_segment_number` to 18
+  with the 100 GB cap kept.
+- Pass `hnsw_ef` 256 from the service's prefetch (the query code does not
+  set it today).
+- The copy back: Qdrant stopped, `zfs send` of 1.61 TB to a new dataset
+  on `tank` (a sequential write, so the mirrors get a defragmented copy),
+  swap, restart, EVO re-attached as L2ARC, warm-up read of the hot files.
+- The `original` rerank still rescores from f32 on disk; measure its
+  recall with `rescore: false` before deciding what it costs on the
+  mirrors behind the cache.
+
+## 8. Operating rules
 
 - Keep graph building enabled during a load unless the load is short:
   segments then merge as they go. If it must be suspended, plan the
