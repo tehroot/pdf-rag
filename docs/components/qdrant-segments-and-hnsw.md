@@ -256,6 +256,25 @@ cold on the mirrors, about 1 s from L2ARC. This step does not shrink with
 consolidation. It can be switched off per query (`rescore: false`), at a
 recall cost on MaxSim not yet measured.
 
+### What the pass looked like in practice (2026-09-20/21, NVMe)
+
+- On auto, the optimizer started five merges at once, each building toward
+  the 300 GB cap in `<shard>/temp_segments/segment_builder_*`. A merge holds
+  its whole output there until it is swapped in, so the worst case is
+  `max_optimization_threads × max_segment_size`. That was 1.5 TB against
+  540 GB free; 480 GB went in 35 minutes. Cancelled by re-`PATCH`ing.
+- Settled at `max_segment_size` 100 GB with 4, later 5, threads: a round of
+  4 merges (about 65 small segments each) lands every ~65 minutes, most of
+  it graph construction. 1,152 → 386 segments in 3.3 hours. A second short
+  stage with the cap at 300 GB takes the ~18 results to 8.
+- Any `PATCH` to `optimizers_config` cancels the merges in flight and
+  discards their temp output. Change thread count or cap right after a
+  round lands, not in the middle of one.
+- Free space, the segment count and per-round timing are cheap to log
+  from a shell loop as a systemd unit; a brake that drops the thread count
+  to 1 below a free-space floor is worth having on a pool without much
+  headroom.
+
 ## 7. Operating rules
 
 - Keep graph building enabled during a load unless the load is short:
@@ -263,6 +282,9 @@ recall cost on MaxSim not yet measured.
   consolidation pass as part of the load, not as an afterthought.
 - Set `default_segment_number` and `max_segment_size` explicitly for a
   large collection; the auto values never merge into large segments.
+- Keep `max_optimization_threads × max_segment_size` below the pool's
+  free space during a consolidation; merges hold their output in
+  `temp_segments` until they land.
 - Size RAM for the resident set: quantized copies with `always_ram`,
   plus the page cache the pooled vectors and graphs need, plus the ARC,
   plus the ingest JVM heap during loads.
