@@ -123,6 +123,65 @@ DTIC segments are above it, so they do have graphs, just tiny ones.
 segment and builds a new graph from scratch. That is the expensive part
 of consolidation, and also the part that makes the index useful.
 
+### Why many tiny graphs lose to a few large ones
+
+A search evaluates about `ef` candidates per segment however small the
+segment is. With 900 points and `ef` 100 that is 11 percent of the
+segment scored with full MaxSim, and the layers add nothing because
+there is nowhere to descend. Over 1,152 segments a query scores about
+115,000 pages and merges 1,152 result lists: close to a brute-force scan
+over 11 percent of the corpus, with graph overhead on top. That is also
+why its recall was 0.9994: it barely approximates.
+
+With 60,000 points per segment the upper layers route the search to the
+right neighbourhood in a few dozen hops and the `ef` candidates at the
+bottom are spent there. Eighteen segments score a few thousand pages per
+query. Same `ef`, about 30× fewer distance computations; the recall given
+up is what `ef` buys back (section 7.4).
+
+The other costs of many small segments are fixed per segment: opening
+files, id lookups, payload index probes, and on a cold cache one set of
+disk reads each. Small segments do win on rebuild cost (a delete or
+update rewrites the segment it lands in) and on very selective payload
+filters; neither applies to a read-mostly corpus. Parallelism is not an
+argument either: Qdrant searches segments in parallel and 18 already
+keeps the cores busy. The right size is the smallest at which the graphs
+have real layers; the measurements put that knee below 18 here.
+
+### What a distance costs
+
+Cosine on every named vector, turned into dot products at write time:
+vectors are L2-normalized on insert and on query. For the multivectors the
+score is MaxSim: for each query row, the best dot product over the page's
+rows, summed over query rows. Per candidate page:
+
+| Vector | Page rows | Query rows | Dot products of 320 | Work per candidate |
+|---|---|---|---|---|
+| `pooled_rows` or `pooled_cols` | 32 | 14 to 20 | up to 640 | about 0.2 MFLOP, 41 KB read |
+| `original`, f32 | up to 1,280 | 14 to 20 | up to 25,600 | about 8 MFLOP, 1.6 MB read |
+| `original`, binary-quantized | up to 1,280 | 14 to 20 | same count, 1 bit per dim | popcount over 40 bytes per row, 51 KB read |
+
+The graph walk evaluates roughly `ef` candidates per segment, so:
+
+| Layout | Candidates per query | Arithmetic |
+|---|---|---|
+| 1,152 segments, `ef` 100 | about 115,000 | about 23 GFLOP |
+| 18 segments, `ef` 256 | about 4,600 | about 1 GFLOP |
+
+A core does a few GFLOP/s on this loop with AVX2, so the 18-segment query
+is milliseconds of math; the measured 0.25 s is memory traffic and
+per-segment overhead. At 1,152 segments the math alone was a second or
+two, and the disk reads to feed it were the rest.
+
+The rerank on `original` scores about 100 candidates: fast bit operations
+against the binary copy in RAM, or 0.8 GFLOP plus 160 MB of reads when
+rescoring from f32. The reads are the cost.
+
+Only `ef` changes the arithmetic, linearly. `m` changes graph quality at
+build time and memory per link, not per-query work. Segment count changes
+the candidate count multiplicatively, which is why it dominated
+everything else.
+
 ## 3. Where each vector lives
 
 Three tiers, chosen per named vector in the collection config:
