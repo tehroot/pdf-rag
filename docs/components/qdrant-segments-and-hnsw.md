@@ -390,9 +390,16 @@ pooled query and 0.09 s per text query.
 
 ## 8. Operating rules
 
-- Keep graph building enabled during a load unless the load is short:
-  segments then merge as they go. If it must be suspended, plan the
-  consolidation pass as part of the load, not as an afterthought.
+- Two settings seal segments during a load, and they need different
+  treatment. `indexing_threshold` (20 MB by default, a seal every 12
+  pages of `original`) makes the optimizer build graphs continuously and
+  throttles upserts; raise it for the duration of a bulk load.
+  `max_segment_size` on auto (about 1.4 GB here) keeps sealing every
+  ~900 pages regardless and makes merges illegal; set it explicitly to the
+  cap you want to live with (100 GB here) with `default_segment_number`
+  to match, so merges proceed during the load into full-size unindexed
+  segments. Restoring the threshold afterwards then builds 18 graphs
+  once, instead of 1,150 graphs and a merge pass.
 - Set `default_segment_number` and `max_segment_size` explicitly for a
   large collection; the auto values never merge into large segments.
 - Keep `max_optimization_threads × max_segment_size` below the pool's
