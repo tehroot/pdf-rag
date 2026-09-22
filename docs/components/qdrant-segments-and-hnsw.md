@@ -470,14 +470,70 @@ reads for candidates the cache has not seen.
 - Copy back to the mirrors as a fresh dataset (`zfs send` at about
   170 MB/s), swap, EVO back to L2ARC, warm-up.
 
-### 7.7 Open at the time of writing
+### 7.7 On the mirrors: residency, not I/O, is the limit (2026-09-22)
+
+After the copy back (`zfs send` at 200 MB/s, 1.61 TB in 2 h 8 min), the
+swap, and the L2ARC warm-up (140 GB of hot files read at 236 MB/s from
+the defragmented dataset in under nine minutes), the pooled probe first
+matched NVMe: 0.26 s single, 7.3 q/s at 8 clients. It did not hold.
+
+| Probe on the mirrors + L2ARC | Result |
+|---|---|
+| service-shaped query, 8 clients | 0.33 q/s, p50 18 s (NVMe: 4 q/s, 1.8 s) |
+| same with `rescore: false` on the rerank | unchanged under load; 0.74 s alone |
+| rerank alone, 100 explicit ids, with or without rescoring | 0.02 s |
+| during the collapse | L2ARC 12,400 read ops/s, mirrors idle, I/O pressure 50-60 % |
+| after faulting the 78 GB pooled set in through a second process | Qdrant's resident file pages fell 97 → 52 GB; pooled probe 2.0 q/s, p90 16 s |
+
+Reading: the queries stall on synchronous 4 KB page faults served from
+the cache device, one at a time per thread, and concurrency makes it
+worse. The pages fault because they are not resident, and they are not
+resident because the host has no margin: Qdrant's 62 GB of anonymous
+memory (the binary `original` copy), 78 GB of mapped pooled vectors that
+must be hot, the 24 GB ARC and 10-15 GB of services add up to about
+175 GB of 188. Any large read (a warm-up, an ingest, a `zfs send`)
+evicts part of the pooled set. On the NVMe pool the same faults cost
+20 µs with real parallelism, so the thrash was invisible; behind an
+L2ARC on spinning mirrors it dominates. Rescoring, the rerank and the
+offsets tables were ruled out one by one.
+
+**Decision (2026-09-22): take the graph walk off the page cache.**
+Scalar int8 on both pooled vectors with `always_ram: true`, f32 kept on
+disk:
+
+| Data | Before | After |
+|---|---|---|
+| f32 pooled vectors, 78 GB | mapped, expected hot in page cache | on disk, unchanged; read only to rescore the prefetch's top 50 (~4 MB per query, L2ARC after first touch) |
+| int8 copy of the pooled vectors, 19 GB | none | new; anonymous RAM, never evicted; used for the HNSW walk |
+| binary copy of `original`, 56 GB | pinned in RAM | unchanged |
+| f32 `original`, 1.6 TB | on disk; rescores the final ~100 candidates (default on; measured: top-1 identical, top-5 overlap 0.988 without it); the only full-precision copy, from which every derived form can be recomputed without re-embedding | unchanged |
+
+Memory after: 62 + 19 GB anonymous plus the ARC, about 80 GB of headroom
+for the page cache and ingest. Stored precision stays FP32 everywhere;
+int8 affects only which pages make the prefetch cut, and `ef` controls
+that margin. The rewrite is one `PATCH`; the optimizer rebuilds the 18
+segments in place (about 1.6 TB read and written sequentially on the
+mirrors, four to six hours, search available meanwhile):
+
+```json
+{
+  "vectors": {"pooled_rows": {"on_disk": true}, "pooled_cols": {"on_disk": true}},
+  "quantization_config": {"scalar": {"type": "int8", "quantile": 0.99, "always_ram": true}}
+}
+```
+
+The collection-level `quantization_config` applies to every named vector
+without its own; `original` keeps its per-vector binary config, verified
+on the collection info after the `PATCH`.
+
+### 7.8 Open at the time of writing
 
 - The copy back: Qdrant stopped, `zfs send` of 1.61 TB to a new dataset
   on `tank` (a sequential write, so the mirrors get a defragmented copy),
   swap, restart, EVO re-attached as L2ARC, warm-up read of the hot files.
-- The `original` rerank still rescores from f32 on disk; measure its
-  recall with `rescore: false` before deciding what it costs on the
-  mirrors behind the cache.
+- The `original` rerank rescores from f32 on disk by default; measured
+  2026-09-22: top-1 identical, top-5 overlap 0.988 without it. Kept on;
+  a per-query switch if its reads ever matter.
 
 ## 8. Operating rules
 
