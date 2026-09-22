@@ -477,7 +477,7 @@ class QdrantClientTest {
 
         float[][] queryVecs = new float[][]{{0.1f, 0.2f}, {0.3f, 0.4f}, {0.5f, 0.6f}};
         List<QdrantClient.PrefetchSpec> prefetches = List.of(
-                new QdrantClient.PrefetchSpec("pooled_rows", queryVecs, 100),
+                new QdrantClient.PrefetchSpec("pooled_rows", queryVecs, 100, 256),
                 new QdrantClient.PrefetchSpec("pooled_cols", queryVecs, 100));
         List<QdrantClient.SearchHitRaw> hits = client.queryMultistage(
                 "pages", prefetches, "original", queryVecs, 10,
@@ -499,6 +499,8 @@ class QdrantClientTest {
         assertThat(body).contains("\"with_payload\":true");
         assertThat(body).contains("\"filter\"");
         assertThat(body).contains("\"must\"");
+        // hnsw_ef goes only on the stage that set it
+        assertThat(body).containsOnlyOnce("\"params\":{\"hnsw_ef\":256}");
     }
 
     @Test

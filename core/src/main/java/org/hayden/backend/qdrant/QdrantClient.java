@@ -442,7 +442,11 @@ public class QdrantClient {
      * vector field, returns its top-K candidates by ANN similarity, and the
      * union of all prefetched candidates becomes the input to the rerank step.
      */
-    public record PrefetchSpec(String using, float[][] query, int limit) {
+    public record PrefetchSpec(String using, float[][] query, int limit, Integer hnswEf) {
+        /** No explicit {@code hnsw_ef}: Qdrant uses the collection's {@code ef} (100). */
+        public PrefetchSpec(String using, float[][] query, int limit) {
+            this(using, query, limit, null);
+        }
     }
 
     /**
@@ -471,6 +475,13 @@ public class QdrantClient {
                 stage.put("query", p.query());
                 stage.put("using", p.using());
                 stage.put("limit", p.limit());
+                if (p.hnswEf() != null) {
+                    // Search-time candidate list per segment. Measured on the
+                    // 18-segment DTIC collection: ef 100 -> recall@50 0.98,
+                    // ef 256 -> 0.99 at the same latency (docs/components/
+                    // qdrant-segments-and-hnsw.md, section 7.4).
+                    stage.put("params", Map.of("hnsw_ef", p.hnswEf()));
+                }
                 prefetchList.add(stage);
             }
             body.put("prefetch", prefetchList);

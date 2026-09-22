@@ -47,6 +47,13 @@ public class ColPaliPipeline {
     @ConfigProperty(name = "ingest.colpali.prefetch-multiplier", defaultValue = "10")
     int prefetchMultiplier;
 
+    /** HNSW candidate list per segment for the prefetch stages (Qdrant hnsw_ef).
+     *  0 means "do not set", i.e. the collection default. 256 is the knee on
+     *  the DTIC collection: recall@50 0.99 at the cost of ef 100; 128 halves
+     *  the CPU for recall@50 0.98 and is the setting under heavy concurrency. */
+    @ConfigProperty(name = "ingest.colpali.prefetch-hnsw-ef", defaultValue = "256")
+    int prefetchHnswEf;
+
     /**
      * Pages per multivector upsert request. Deliberately separate from (and far
      * smaller than) the text side's {@code upsert-batch-size}: a ColQwen2-class
@@ -235,9 +242,10 @@ public class ColPaliPipeline {
         float[][] queryVectors = sidecar.embedQuery(req.query());
         long tEmbed = System.nanoTime();
 
+        Integer hnswEf = prefetchHnswEf > 0 ? prefetchHnswEf : null;
         List<QdrantClient.PrefetchSpec> prefetches = List.of(
-                new QdrantClient.PrefetchSpec("pooled_rows", queryVectors, prefetchLimit),
-                new QdrantClient.PrefetchSpec("pooled_cols", queryVectors, prefetchLimit));
+                new QdrantClient.PrefetchSpec("pooled_rows", queryVectors, prefetchLimit, hnswEf),
+                new QdrantClient.PrefetchSpec("pooled_cols", queryVectors, prefetchLimit, hnswEf));
 
         String pagesCollection = pagesCollectionName(req.kbName());
         List<QdrantClient.SearchHitRaw> raw = qdrant.queryMultistage(
