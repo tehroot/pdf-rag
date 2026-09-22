@@ -339,7 +339,7 @@ recall cost on MaxSim not yet measured.
 The sequence as executed on the R530, with the numbers observed at each
 step. Section 6 has the reasoning; this is the record.
 
-### 8.1 Diagnosis (2026-09-19 to 20)
+### 7.1 Diagnosis (2026-09-19 to 20)
 
 1. After the load, `indexing_threshold` was restored to 20,000 and the
    graphs built (about 12 hours). The collection turned green, but a
@@ -365,7 +365,7 @@ step. Section 6 has the reasoning; this is the record.
    1,150 segments had graphs; the file listing showed each graph was 21 to
    28 KB. The cost was fan-out, not missing indexes.
 
-### 8.2 Storage moves
+### 7.2 Storage moves
 
 6. The Samsung 970 EVO Plus 2 TB, which held a Windows system volume, was
    emptied: `Users` (162 GB) and `backup_files` (401 GB) were copied to a
@@ -387,7 +387,7 @@ step. Section 6 has the reasoning; this is the record.
    restarted there. Counts matched (934,834 pages, 2,012,201 chunks) after
    one partial duplicate resurrected by WAL replay was deleted again.
 
-### 8.3 The consolidation pass
+### 7.3 The consolidation pass
 
 10. Baseline on NVMe, still 1,152 segments: pooled query 7 s cold, 3 s
     warm; text 0.7 s. A 50-query benchmark set was embedded once through
@@ -411,7 +411,7 @@ step. Section 6 has the reasoning; this is the record.
 14. Result: 18 segments of 79 to 99 GB, green, counts unchanged, 1.13 TB
     free on the NVMe pool.
 
-### 8.4 Measurements at 18 segments
+### 7.4 Measurements at 18 segments
 
 Real 50 queries, top 100, against exact ground truth; optimizer idle:
 
@@ -431,15 +431,47 @@ out for two days, returns in about a second. An exact scan takes 6 s.
 The random-vector sampler, once the optimizer went idle, read 0.1 s per
 pooled query and 0.09 s per text query.
 
-### 8.5 Open at the time of writing
+### 7.5 Concurrency (2026-09-21, NVMe, 18 segments)
 
-- Whether to merge 18 → 8. The data says 18 is past the knee; 8 halves
-  the fan-out for perhaps 0.1 s at p50, costs three to four more hours,
-  and leaves 300 GB segments that make future merges heavier. The
-  recommendation is to stop at 18 and set `default_segment_number` to 18
-  with the 100 GB cap kept.
-- Pass `hnsw_ef` 256 from the service's prefetch (the query code does not
-  set it today).
+Real 50 queries, `ef` 256, `pooled_rows`, top 100, N parallel clients:
+
+| Clients | Throughput | p50 | p90 |
+|---|---|---|---|
+| 1 | 3.8 q/s | 0.26 s | 0.32 s |
+| 4 | 7.8 q/s | 0.52 s | 0.57 s |
+| 8 | 7.8 q/s | 1.02 s | 1.09 s |
+| 16 | 7.7 q/s | 2.06 s | 2.15 s |
+
+During the 16-client run Qdrant used 3,890 percent CPU (all 40 cores),
+with zero NVMe reads and zero major page faults: the ceiling is compute,
+5.2 core-seconds per query. Work per query is segments × `ef` × `m` (the
+walk scores every neighbour of every expanded node, each a 41 KB MaxSim
+block), and the levers scale accordingly: `ef` 128 gives 14.7 q/s at
+recall@50 0.98, `ef` 64 gives 27.4 q/s. The service-shaped query (two
+prefetches plus the `original` rerank) ran at 4.0 q/s, p50 1.8 s, with 8
+clients. There is no isolation or admission control: clients share the
+pool fairly and all slow together past saturation.
+
+Because the hot path is CPU, the mirrors with an L2ARC give the same
+numbers once the cache is warm; the mirrors only serve the rerank's f32
+reads for candidates the cache has not seen.
+
+### 7.6 Decisions taken
+
+- Stay at 18 segments; `default_segment_number` set to 18 with the 100 GB
+  cap so future segments merge into the same shape. Going to 8 would have
+  doubled throughput at constant recall, at the cost of 300 GB segments
+  for every future merge; revisit if concurrent load demands it.
+- The service now sets `hnsw_ef` on its prefetch stages:
+  `COLPALI_PREFETCH_HNSW_EF`, default 256, with 128 as the setting under
+  heavy concurrency (commit 77ecbf3). Measured at 18 segments, top-1 is
+  exact from 128 up and recall@50 is 0.98 at 128, 0.99 at 256, 0.997 at
+  512; each doubling halves the misses and doubles the CPU.
+- Copy back to the mirrors as a fresh dataset (`zfs send` at about
+  170 MB/s), swap, EVO back to L2ARC, warm-up.
+
+### 7.7 Open at the time of writing
+
 - The copy back: Qdrant stopped, `zfs send` of 1.61 TB to a new dataset
   on `tank` (a sequential write, so the mirrors get a defragmented copy),
   swap, restart, EVO re-attached as L2ARC, warm-up read of the hot files.
