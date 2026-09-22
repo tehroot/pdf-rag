@@ -5,9 +5,9 @@ flight, and the open decisions. For the architecture see
 [architecture.md](architecture.md); for per-component detail see
 [components/](components/README.md).
 
-**As of:** 2026-09-18 · branch `feature/ingest-endpoint` (ahead of `main`,
-pending merge). The September throughput work (commits `a4d9716`..`8eb15fe`,
-2026-09-17/18) is committed here.
+**As of:** 2026-09-22 · branch `main`. The September throughput work
+(2026-09-17/18), the DTIC load fixes (19th) and the Qdrant consolidation
+and storage work (20th-22nd) are all on `main`.
 
 ## Snapshot
 
@@ -81,6 +81,23 @@ Measured figures are in the plan docs.
 Incident to remember: `@ConfigProperty(defaultValue = "")` is "no value" to
 SmallRye Config; the first gRPC build crash-looped for 9 min. Sentinel
 defaults only, and tag the running image before a risky deploy.
+
+## Shipped since (September 2026, 19th–22nd): the DTIC load's tail, Qdrant consolidation, storage
+
+Full record with numbers: [components/qdrant-segments-and-hnsw.md](components/qdrant-segments-and-hnsw.md)
+(sections 5 and 7). Operating facts for the R530 are in `CLAUDE.md`
+under "Live deployment facts".
+
+| Area | What | Docs / commits |
+|---|---|---|
+| Load-tail fixes | `IngestWorker` records `OutOfMemoryError` as a failed job (3 jobs had sat `IN_PROGRESS` for a day). `TextSanitizer` strips lone UTF-16 surrogates at PDFBox extraction and again on the stored chunk text (the sliding window splits pairs); llama-server (500) and Qdrant (400) both rejected them. `INGEST_MAX_FILE_BYTES`, `INGEST_EMBED_REQUEST_TIMEOUT_SECONDS` configurable; the embedder error names its cause. Compose folded-block comment bug fixed; `COMPOSE_FILE` pinned in the R530 `.env`. | a328091, ea33775, 6426e69, 463d1a0, 7c213c2 |
+| Runner | `scripts/bulk_ingest_runner.py` counts a file done on page points (chunks alone hid 24 files whose visual job had failed); `--text-only` for KBs without a visual index. | 54e7060 |
+| Duplicates | Directory-ingest ids are UUIDv5 of the *staging symlink path*, so any resubmit through a new staging dir makes a second document. 402 files had 2-4 ids; 466 surplus ids deleted, keeping the most complete copy. Durable fix is the planner's content-hash identity. | [plans/ingest-planner-v1.md](plans/ingest-planner-v1.md) decision D |
+| Consolidation | `dtic_archive_pages` merged from 1,152 segments (~900 pages each) to 18 (79-99 GB) via `default_segment_number` 18 / `max_segment_size` 100 GB, run on a temporary NVMe pool (`zfs send` round trip) because the fragmented mirrors read at 77 MB/s. Pooled query 5.7 s → 0.26 s at recall@100 0.99; text search 18 s → 0.7 s. | [components/qdrant-segments-and-hnsw.md](components/qdrant-segments-and-hnsw.md) 7.3-7.4 |
+| Search `hnsw_ef` | `COLPALI_PREFETCH_HNSW_EF` (default 256; 128 under heavy concurrency) on the visual prefetch stages. Measured: top-1 exact from 128 up; recall@50 0.98 / 0.99 / 0.997 at 128 / 256 / 512. | 77ecbf3 |
+| Concurrency | Search is CPU-bound: 5.2 core-seconds per pooled query at ef 256, 7.7 q/s saturated on 40 cores, no isolation between clients. | segments doc 7.5 |
+| Storage | Qdrant back on the mirrors (`tank/qdrant`, defragmented by the copy); Samsung EVO 2 TB as L2ARC on `tank`; ARC capped 24 GiB at runtime (`zfs_arc_min` floor had to be lowered first); one ADATA 1 TB spare, the other defective (7,691 media errors). | segments doc 4, 7.2, 7.7 |
+| In flight (2026-09-22 13:43) | Scalar int8 `always_ram` on the pooled vectors, f32 kept on disk: the page cache cannot hold 78 GB of f32 pooled + 62 GB anonymous + ARC, and queries collapsed to 0.33 q/s under 8 clients on the mirrors. Optimizer rewrite of the 18 segments running; recall and concurrency re-measured after. | segments doc 7.7 |
 
 ## Designed, not built
 

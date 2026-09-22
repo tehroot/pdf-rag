@@ -366,6 +366,56 @@ sequence-bucket pooling (dynamic resolution, no square grid) and the
   the loser's conflict by re-reading and validating. Don't "simplify" that
   try/catch away.
 
+## Live deployment facts (R530 "huge-dumb", 192.168.1.76) — as of 2026-09-22
+
+Read this before touching the R530. Details and the reasoning:
+[docs/components/qdrant-segments-and-hnsw.md](docs/components/qdrant-segments-and-hnsw.md),
+[docs/deployment.md](docs/deployment.md) "Bulk directory loads".
+
+- **Layout.** Repo clone `/srv/pdf-rag` (tracks `main`); `.env` pins
+  `COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml:docker-compose.pool.yml`
+  (without it a recreate silently drops the sidecar pool: verify
+  `COLPALI_SIDECAR_URL=http://colpali-lb:8090` on `pdf-rag-http` after any
+  `up`). Qdrant data `QDRANT_DATA_DIR=/tank/qdrant` (ZFS dataset on two
+  spinning mirrors); `tank/qdrant-old` is the pre-consolidation copy kept
+  until the user says to destroy it. Page images `/tank/page-images`,
+  corpus `/tank/documents/archive-org-dtic`.
+- **Knowledge base `dtic_archive`.** 12,167 PDFs, 934,834 pages, 2,012,201
+  chunks (exact counts via `POST /collections/<c>/points/count` with
+  `exact: true`; the collection-info counters are approximate).
+  `dtic_archive_pages`: 18 segments, `default_segment_number` 18,
+  `max_segment_size` 100 GB, `indexing_threshold` 20,000; `original`
+  binary-quantized in RAM + f32 on disk; pooled vectors f32 on disk with
+  an int8 `always_ram` copy (rewrite in progress 2026-09-22). Never raise
+  `indexing_threshold` for a load without also setting the segment cap,
+  and never `PATCH` `optimizers_config` mid-round: it cancels the merges
+  in flight.
+- **Memory budget.** 188 GB RAM: Qdrant ~62 GB anonymous (binary
+  originals) + int8 pooled ~19 GB, ARC capped at 24 GiB at runtime
+  (`/etc/modprobe.d/zfs.conf` still says 64/63 GiB → reverts at reboot),
+  ingest JVM `-Xmx48g` during loads. Page-cache residency of mapped files
+  is not guaranteed and search must not depend on it.
+- **NVMe.** Samsung 970 EVO 2 TB (S6S2NS0W323712L) = L2ARC on `tank`
+  (persistent; warm with a sequential read of the hot files with
+  `l2arc_noprefetch=0`, then restore 1). ADATA 2L44291A9GEG: blank spare.
+  ADATA 2L422L142JKP (nvme1n1): defective, do not use. WD Black: Windows.
+- **Benchmark assets** in `/srv/pdf-corpus/ingest/recall/`: 50 embedded
+  queries, exact top-100 ground truth per pooled vector, `recall_check.py
+  <ef>`, `concurrency.py <clients> <secs> <ef> [vector]`, `rescore_check.py
+  agree|load N`. Operational scripts and logs in `/srv/pdf-corpus/ingest/`
+  (bulk runner copy `ingest_runner2.py`, dup audit, systemd units used for
+  long tasks: `systemd-run --unit=<name> ...`; never run long jobs from a
+  laptop-side shell loop).
+- **Sidecar pool.** `colpali-lb` (nginx) → local `colpali-server` (A4500)
+  + 8 replicas on big-dumb 192.168.1.45 (:8100-8103, :8110-8113); the
+  balancer's `/healthz` probes only the local replica (1 s timeout), so a
+  busy local sidecar can make submits report "sidecar unreachable". The
+  chat LLM on big-dumb is stopped while the replicas run.
+- **Model.** `TomoroAI/tomoro-colqwen3-embed-4b` @ bf790bd, 320-dim, up to
+  1,280 visual tokens per page (`max_visual_tokens`, ~32 px per token at
+  150 dpi render); `pooled_rows` / `pooled_cols` are 32-bucket
+  *sequence* pools (contiguous / strided), not image rows and columns.
+
 ## Configuration
 
 Env vars (consumed via `@ConfigProperty`, see

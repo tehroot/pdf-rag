@@ -109,7 +109,11 @@ pages give graphs with real layers and roughly two orders of magnitude
 fewer visited nodes.
 
 **Multivectors.** For `pooled_rows` and `pooled_cols` a node is a page's
-32-row multivector and the distance is MaxSim over all rows. Every
+32-row multivector and the distance is MaxSim over all rows. (With the
+Qwen3-VL-class model the two are 32-bucket pools of the token *sequence*,
+contiguous and strided; the names come from the grid-based ColPali models.
+The stored `original` is the full sequence: up to 1,280 visual tokens per
+page at 150 dpi, about 32 px per token, plus a few special tokens.) Every
 visited node reads a 41 KB block and does 32 dot products per query row.
 Fewer visited nodes means proportionally fewer blocks read; that is the
 disk volume per query.
