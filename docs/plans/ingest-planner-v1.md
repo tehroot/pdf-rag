@@ -256,6 +256,49 @@ Touch points: `IngestResource`, `KnowledgeBaseResource`, `QdrantClient`
 | 5 files failed on a masked 120 s embedder timeout | one request per chunk batch, twelve threads on eight slots | 4 (bounded embed queue sized from slot count) |
 | 39 files failed on lone UTF-16 surrogates in two different parsers | PDFBox output and a window that splits pairs (fixed at extraction and payload, ea33775, 6426e69) | none needed; noted because step 1's hash must be taken on bytes, not text |
 
+## Step 6 (proposed 2026-09-23): GPU prefetch index off the ingest host
+
+**Why.** After consolidation and int8 pooled vectors, visual search on the
+R530 is CPU-bound at about 10 service queries/s (5 core-seconds per query
+in the HNSW walk, 40 cores). A brute-force MaxSim over all 934k pages on a
+GPU is exact and reads 9.5 GB (int8 `pooled_rows`) per pass: ~50-75 ms on
+an A4500, and batching amortizes the read. The A4500 cannot host the index
+beside the embedding model (13.4 of 20 GB used), but big-dumb's CMP 170HX
+cards have 64 GB each.
+
+**Placement.** One CMP 170HX on big-dumb holds the index in a fixed
+allocation (int8 `pooled_rows` 9.5 GB; both pools 19 GB); the chat LLM's
+`--tensor-split` gives that card correspondingly less of the model so its
+KV cache gets a known remainder. The A4500 keeps the ColPali sidecar at
+full batch size, always on, for query embedding, small uploads and bulk
+loads (about 90 pages/min alone; replicas on big-dumb remain an option
+for a big load, with the LLM stopped for that window).
+
+**Query path.** Sidecar embeds the query on the A4500 → index service on
+big-dumb returns the top 100-200 page ids (exact int8 MaxSim, f32
+rescore of the candidates) → Qdrant reranks those ids on `original` as
+today. Qdrant's own pooled HNSW path stays as the fallback when the
+index service is down, so search never depends on big-dumb.
+
+**What it removes / adds.** Removes `ef`, oversampling and the graph
+walk's CPU cost. Adds one service (Python, torch, one HTTP endpoint), a
+`ColPaliPipeline` hook with fallback, and an index rebuild after each
+ingest (pull pooled vectors from Qdrant via gRPC, quantize, load; minutes;
+triggered by bulk mode or a timer). Between rebuilds the index lags the
+collection; the fallback covers new documents.
+
+**Sequence.**
+1. Measure on the A4500 in idle time: export `pooled_rows`/`pooled_cols`
+   (done: `/srv/pdf-corpus/gpu-prefetch/`), int8 brute-force top-200 for
+   the 50 benchmark queries vs the exact f32 ground truth, with and
+   without f32 rescoring; end-to-end top-5 through Qdrant's rerank.
+   Decides one pool vs both. (`gpu_prefetch_bench.py`, results in
+   `gpu_bench_results.json`.)
+2. Build the index service and the pipeline hook; deploy on big-dumb GPU 1
+   with the LLM split adjusted. 2-3 days.
+3. Rebuild trigger in bulk mode (step 5) and a staleness check in
+   `/ingest/stats`.
+
 ## Data model changes, compatibility
 
 | Change | Backward compatible? |
