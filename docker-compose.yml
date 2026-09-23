@@ -211,10 +211,13 @@ services:
       # chunks; with many text threads queued on llama-server's slots the
       # wait at the tail of a long document passes 120 s (R530, 2026-09-19).
       INGEST_EMBED_REQUEST_TIMEOUT_SECONDS: ${INGEST_EMBED_REQUEST_TIMEOUT_SECONDS:-120}
-      # hnsw_ef for the visual prefetch stages. 256 = recall@50 0.99 at the cost
-      # of the collection default (100); 128 halves search CPU under heavy
-      # concurrency for recall@50 0.98. See docs/components/qdrant-segments-and-hnsw.md.
-      COLPALI_PREFETCH_HNSW_EF: ${COLPALI_PREFETCH_HNSW_EF:-256}
+      # hnsw_ef for the visual prefetch stages. With int8 pooled vectors and
+      # oversampling 2.0, 128 gives top-1 1.00 / recall@50 0.99 at 9.6 q/s on
+      # 40 cores; 256 halves that for +0.003. docs/components/qdrant-segments-and-hnsw.md 7.8.
+      COLPALI_PREFETCH_HNSW_EF: ${COLPALI_PREFETCH_HNSW_EF:-128}
+      # Oversampling for quantized pooled vectors: collect N x limit by int8,
+      # rescore from f32. 2.0 restores f32-walk recall (top-1 1.00, recall@50 0.99).
+      COLPALI_PREFETCH_OVERSAMPLING: ${COLPALI_PREFETCH_OVERSAMPLING:-2.0}
 
       # Page-image storage (rendered PNGs for inspect_page)
       INGEST_PAGE_STORE_ROOT: /var/lib/pdf-rag-ingest/page-images

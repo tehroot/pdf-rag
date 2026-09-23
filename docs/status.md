@@ -111,7 +111,12 @@ under "Live deployment facts".
   is a **fresh-KB** capability (schema immutable) with a `use_lexical` per-search
   A/B toggle wired to the eval harness. Motivated by a Weaviate gut-check →
   Weaviate is a Qdrant peer, not a replacement; the only real gap is the
-  dense-only text side. **Design only; awaiting go-ahead.**
+  dense-only text side. **Revised 2026-09-22** against the DTIC deployment
+  and six probes on Qdrant 1.13.4: dense stays unnamed, fusion shape is
+  `{"fusion":"rrf"}`, sparse cannot be added in place, so `dtic_archive`
+  gets a copy-backfill (no re-extract, no re-embed, `_pages` untouched) and
+  a snapshot-recover swap under its original name. **Design only; awaiting
+  go-ahead.**
 
 ## Tests
 

@@ -530,7 +530,43 @@ The collection-level `quantization_config` applies to every named vector
 without its own; `original` keeps its per-vector binary config, verified
 on the collection info after the `PATCH`.
 
-### 7.8 Open at the time of writing
+### 7.8 After the int8 rewrite (2026-09-23)
+
+The rewrite ran 13:43 to 00:04 (10.3 h) in place on the mirrors. Qdrant's
+anonymous memory rose from 59 to 81 GB (the int8 copies); the collection
+is green at 18 segments with the same counts. `original` kept its binary
+config. Real 50 queries against the exact ground truth:
+
+| `ef` | oversampling | top-1 | recall@10 | recall@50 | recall@100 | p50 alone |
+|---|---|---|---|---|---|---|
+| 256 | 1.0 (Qdrant default) | 0.94 / 0.92 | 0.938 / 0.952 | 0.972 / 0.972 | 0.972 / 0.973 | 0.24 s |
+| 512 | 1.0 | 0.94 / 0.92 | 0.942 / 0.952 | 0.975 / 0.973 | 0.976 / 0.974 | 0.38 s |
+| 128 | 2.0 | 1.00 / 1.00 | 0.982 / 0.986 | 0.990 / 0.990 | 0.987 / 0.990 | 0.16 s |
+| 256 | 2.0 | 1.00 / 1.00 | 0.980 / 0.984 | 0.993 / 0.994 | 0.991 / 0.995 | 0.5-0.8 s |
+| 256 | 3.0 | 1.00 / 1.00 | 0.982 / 0.984 | 0.993 / 0.995 | 0.992 / 0.996 | 0.4-0.5 s |
+
+Pairs are `pooled_rows` / `pooled_cols`. With the walk ranking by int8,
+Qdrant's default oversampling of 1.0 rescores only the returned list, so
+the walk's ranking errors leak through: the top-1 changes on 6-8 percent
+of queries. Oversampling 2.0 (collect 2 × limit by int8, rescore from
+f32, then cut) restores the f32-walk figures. Raising `ef` instead does
+not help (512 ≈ 256), because the loss is in the ranking, not the reach.
+
+Throughput, 8 clients, oversampling 2.0:
+
+| Query | `ef` 128 | `ef` 256 |
+|---|---|---|
+| `pooled_rows` only | 12.7 q/s, p50 0.63 s | 10.4 q/s, p50 0.77 s |
+| service-shaped (two prefetches + `original` rerank with rescore) | 9.6 q/s, p50 0.74 s, p90 1.2 s | 5.4 q/s, p50 1.3 s |
+| service-shaped, one client | 3.9 q/s, p50 0.25 s | |
+
+Against 0.33 q/s and p50 18 s the day before on the same mirrors, with
+I/O pressure now at 1-4 percent. The service defaults became `ef` 128
+with oversampling 2.0 (`COLPALI_PREFETCH_HNSW_EF`,
+`COLPALI_PREFETCH_OVERSAMPLING`); 256 remains the setting for the last
+0.003 of recall@50 at half the throughput.
+
+### 7.9 Open at the time of writing
 
 - The copy back: Qdrant stopped, `zfs send` of 1.61 TB to a new dataset
   on `tank` (a sequential write, so the mirrors get a defragmented copy),

@@ -48,11 +48,19 @@ public class ColPaliPipeline {
     int prefetchMultiplier;
 
     /** HNSW candidate list per segment for the prefetch stages (Qdrant hnsw_ef).
-     *  0 means "do not set", i.e. the collection default. 256 is the knee on
-     *  the DTIC collection: recall@50 0.99 at the cost of ef 100; 128 halves
-     *  the CPU for recall@50 0.98 and is the setting under heavy concurrency. */
-    @ConfigProperty(name = "ingest.colpali.prefetch-hnsw-ef", defaultValue = "256")
+     *  0 means "do not set", i.e. the collection default. With int8 pooled
+     *  vectors and oversampling 2.0, ef 128 gives top-1 1.00 and recall@50
+     *  0.99 on the DTIC collection at 9.6 service queries/s on 40 cores;
+     *  256 costs half the throughput for +0.003 recall@50 (segments doc 7.8). */
+    @ConfigProperty(name = "ingest.colpali.prefetch-hnsw-ef", defaultValue = "128")
     int prefetchHnswEf;
+
+    /** Quantization oversampling for the prefetch stages: the int8 walk
+     *  collects this many times the limit, f32 rescores, then the cut. 0 =
+     *  Qdrant default (1.0), which lets int8 ranking errors through. 2.0
+     *  restores f32-walk recall (section 7.8 of the segments doc). */
+    @ConfigProperty(name = "ingest.colpali.prefetch-oversampling", defaultValue = "2.0")
+    double prefetchOversampling;
 
     /**
      * Pages per multivector upsert request. Deliberately separate from (and far
@@ -243,9 +251,10 @@ public class ColPaliPipeline {
         long tEmbed = System.nanoTime();
 
         Integer hnswEf = prefetchHnswEf > 0 ? prefetchHnswEf : null;
+        Double oversampling = prefetchOversampling > 0 ? prefetchOversampling : null;
         List<QdrantClient.PrefetchSpec> prefetches = List.of(
-                new QdrantClient.PrefetchSpec("pooled_rows", queryVectors, prefetchLimit, hnswEf),
-                new QdrantClient.PrefetchSpec("pooled_cols", queryVectors, prefetchLimit, hnswEf));
+                new QdrantClient.PrefetchSpec("pooled_rows", queryVectors, prefetchLimit, hnswEf, oversampling),
+                new QdrantClient.PrefetchSpec("pooled_cols", queryVectors, prefetchLimit, hnswEf, oversampling));
 
         String pagesCollection = pagesCollectionName(req.kbName());
         List<QdrantClient.SearchHitRaw> raw = qdrant.queryMultistage(

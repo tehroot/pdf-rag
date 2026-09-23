@@ -1,7 +1,15 @@
 # Plan: Lexical hybrid — "Neu" (learned sparse: SPLADE / BM42 via sidecar) (v1)
 
 Status: design converged, additive follow-on to the Classic plan
-Author drafted: 2026-07-06
+Author drafted: 2026-07-06 · Note added 2026-09-22
+
+> **Revision-2 note (2026-09-22).** The Classic plan's spine changed after probes against
+> Qdrant 1.13.4: the dense vector stays **unnamed** (the hybrid prefetch omits `using` for it), the
+> fusion wire shape is `"query": {"fusion": "rrf"}` (not `{"rrf": {}}`), the `encodeDocuments` batch
+> method and the "a KB is bound to its encoder" rule are pulled forward into the Classic plan, and a
+> backfill path for existing dense-only KBs exists. Read this plan's spine references with those
+> corrections; only the encoder and the sidecar endpoints below are specific to Neu.
+
 Depends on: [lexical-bm25-hybrid-classic-v1.md](lexical-bm25-hybrid-classic-v1.md) — this plan reuses
 that plan's entire hybrid collection/upsert/query spine and only swaps the *encoder* + a couple of
 config keys.

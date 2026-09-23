@@ -442,10 +442,14 @@ public class QdrantClient {
      * vector field, returns its top-K candidates by ANN similarity, and the
      * union of all prefetched candidates becomes the input to the rerank step.
      */
-    public record PrefetchSpec(String using, float[][] query, int limit, Integer hnswEf) {
+    public record PrefetchSpec(String using, float[][] query, int limit, Integer hnswEf, Double oversampling) {
         /** No explicit {@code hnsw_ef}: Qdrant uses the collection's {@code ef} (100). */
         public PrefetchSpec(String using, float[][] query, int limit) {
-            this(using, query, limit, null);
+            this(using, query, limit, null, null);
+        }
+
+        public PrefetchSpec(String using, float[][] query, int limit, Integer hnswEf) {
+            this(using, query, limit, hnswEf, null);
         }
     }
 
@@ -475,12 +479,25 @@ public class QdrantClient {
                 stage.put("query", p.query());
                 stage.put("using", p.using());
                 stage.put("limit", p.limit());
+                Map<String, Object> params = new LinkedHashMap<>();
                 if (p.hnswEf() != null) {
                     // Search-time candidate list per segment. Measured on the
                     // 18-segment DTIC collection: ef 100 -> recall@50 0.98,
                     // ef 256 -> 0.99 at the same latency (docs/components/
                     // qdrant-segments-and-hnsw.md, section 7.4).
-                    stage.put("params", Map.of("hnsw_ef", p.hnswEf()));
+                    params.put("hnsw_ef", p.hnswEf());
+                }
+                if (p.oversampling() != null) {
+                    // With a quantized pooled vector the graph walk ranks by
+                    // the int8 copy; oversampling N collects N x limit
+                    // candidates and rescores them from f32 before cutting.
+                    // At 1.0 the walk's ranking errors leak through (top-1
+                    // 0.94, recall@50 0.97); at 2.0 top-1 1.00, recall@50
+                    // 0.99 (section 7.8). No effect on unquantized vectors.
+                    params.put("quantization", Map.of("rescore", true, "oversampling", p.oversampling()));
+                }
+                if (!params.isEmpty()) {
+                    stage.put("params", params);
                 }
                 prefetchList.add(stage);
             }
