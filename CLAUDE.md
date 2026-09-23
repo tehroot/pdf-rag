@@ -366,7 +366,7 @@ sequence-bucket pooling (dynamic resolution, no square grid) and the
   the loser's conflict by re-reading and validating. Don't "simplify" that
   try/catch away.
 
-## Live deployment facts (R530 "huge-dumb", 192.168.1.76) — as of 2026-09-22
+## Live deployment facts (R530 "huge-dumb", 192.168.1.76) — as of 2026-09-23
 
 Read this before touching the R530. Details and the reasoning:
 [docs/components/qdrant-segments-and-hnsw.md](docs/components/qdrant-segments-and-hnsw.md),
@@ -386,7 +386,9 @@ Read this before touching the R530. Details and the reasoning:
   `dtic_archive_pages`: 18 segments, `default_segment_number` 18,
   `max_segment_size` 100 GB, `indexing_threshold` 20,000; `original`
   binary-quantized in RAM + f32 on disk; pooled vectors f32 on disk with
-  an int8 `always_ram` copy (rewrite in progress 2026-09-22). Never raise
+  an int8 `always_ram` copy (done 2026-09-23). Service prefetch defaults:
+  `hnsw_ef` 128, oversampling 2.0 with f32 rescoring — do not drop the
+  oversampling on a quantized collection (top-1 falls to 0.94). Never raise
   `indexing_threshold` for a load without also setting the segment cap,
   and never `PATCH` `optimizers_config` mid-round: it cancels the merges
   in flight.

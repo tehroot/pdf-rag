@@ -5,7 +5,7 @@ flight, and the open decisions. For the architecture see
 [architecture.md](architecture.md); for per-component detail see
 [components/](components/README.md).
 
-**As of:** 2026-09-22 · branch `main`. The September throughput work
+**As of:** 2026-09-23 · branch `main`. The September throughput work
 (2026-09-17/18), the DTIC load fixes (19th) and the Qdrant consolidation
 and storage work (20th-22nd) are all on `main`.
 
@@ -97,7 +97,8 @@ under "Live deployment facts".
 | Search `hnsw_ef` | `COLPALI_PREFETCH_HNSW_EF` (default 256; 128 under heavy concurrency) on the visual prefetch stages. Measured: top-1 exact from 128 up; recall@50 0.98 / 0.99 / 0.997 at 128 / 256 / 512. | 77ecbf3 |
 | Concurrency | Search is CPU-bound: 5.2 core-seconds per pooled query at ef 256, 7.7 q/s saturated on 40 cores, no isolation between clients. | segments doc 7.5 |
 | Storage | Qdrant back on the mirrors (`tank/qdrant`, defragmented by the copy); Samsung EVO 2 TB as L2ARC on `tank`; ARC capped 24 GiB at runtime (`zfs_arc_min` floor had to be lowered first); one ADATA 1 TB spare, the other defective (7,691 media errors). | segments doc 4, 7.2, 7.7 |
-| In flight (2026-09-22 13:43) | Scalar int8 `always_ram` on the pooled vectors, f32 kept on disk: the page cache cannot hold 78 GB of f32 pooled + 62 GB anonymous + ARC, and queries collapsed to 0.33 q/s under 8 clients on the mirrors. Optimizer rewrite of the 18 segments running; recall and concurrency re-measured after. | segments doc 7.7 |
+| int8 pooled vectors | Scalar int8 `always_ram` on the pooled vectors, f32 kept on disk (rewrite 2026-09-22 13:43 → 23 00:04): the page cache could not hold 78 GB of f32 pooled + 62 GB anonymous + ARC, and queries had collapsed to 0.33 q/s under 8 clients on the mirrors. After: service-shaped query 9.6 q/s, p50 0.74 s at 8 clients, 0.25 s alone; I/O pressure 1-4 %. | segments doc 7.7-7.8 |
+| Prefetch oversampling | With the int8 walk, Qdrant's default oversampling let ranking errors through (top-1 0.94). `COLPALI_PREFETCH_OVERSAMPLING` 2.0 (int8 collects 2× limit, f32 rescores) restores top-1 1.00 / recall@50 0.99; `COLPALI_PREFETCH_HNSW_EF` default now 128 (256 = +0.003 recall@50 at half the throughput). | 219e97c, segments doc 7.8 |
 
 ## Designed, not built
 
