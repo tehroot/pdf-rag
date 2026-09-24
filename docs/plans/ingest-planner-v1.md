@@ -304,6 +304,26 @@ collection; the fallback covers new documents.
 VRAM 9.6 GB for one pool. A CMP 170HX (HBM2e, ~1.5 TB/s vs the A4500's
 640 GB/s) should roughly halve the per-pass time. One pool suffices.
 
+**CPU (AVX-512) vs GPU, same synthetic MaxSim (100k pages, 20-row
+query, 2026-09-24).** Full-corpus pass = 100k figure × 9.35.
+
+| Host / unit | f32 | bf16 | int8 | notes |
+|---|---|---|---|---|
+| R530, 2× Xeon E5-2650 v3, 40 thr, AVX2 | 0.176 s | 0.341 s (emulated) | 0.478 s (no VNNI) | 37 GB/s RAM |
+| big-dumb, Ryzen 9 9950X, 32 thr, AVX-512 + VNNI + BF16 | 0.747 s | 0.116 s | 0.033 s (oneDNN int8 proxy) | 50 GB/s RAM; replicas resident |
+| A4500 (R530, eGPU dock) | 9.8 ms | 5.7 ms (fp16) | 8.0 ms | 640 GB/s |
+| CMP 170HX (big-dumb) | 7.3 ms | 3.1 ms (fp16) | 6.4 ms | HBM2e; 12 GB free beside the replicas at the time |
+
+Reading: Zen 5's AVX-512 makes int8 MaxSim about 15× faster than the
+Haswell Xeons and bf16 about 3×, but a full-corpus pass is still about
+0.3 s (int8) to 1.1 s (bf16) per query on the CPU against 29 ms on the
+170HX in fp16, because the pass is bound by 50 GB/s of DRAM versus
+1.5 TB/s of HBM. The GPU index stays the design; the AVX-512 host would
+be the better CPU for Qdrant's graph walk if Qdrant were ever re-homed
+there (16 cores, 60 GB RAM rule that out today). The f32 CPU figure on
+big-dumb is anomalous (slower than bf16); likely oneDNN kernel selection
+or clock scaling under the resident replicas, not re-run.
+
 **Rerank-depth finding (same run).** Feeding the exact prefetch into
 Qdrant's `original` rerank shows the final top-5 depends on the number of
 candidates reranked more than on how they were found: the service's
