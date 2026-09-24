@@ -287,13 +287,43 @@ ingest (pull pooled vectors from Qdrant via gRPC, quantize, load; minutes;
 triggered by bulk mode or a timer). Between rebuilds the index lags the
 collection; the fallback covers new documents.
 
+**Measurement results (2026-09-24, A4500, `pooled_rows`, 934,834 pages,
+50 queries vs exact f32 ground truth).**
+
+| Prefetch | top-1 | recall@50 | recall@100 |
+|---|---|---|---|
+| int8 brute force, per-page scale | 0.98 | 0.995 | 0.992 |
+| int8 top-200 then f32 rescore (production shape) | 1.00 | 0.999 | 0.999 |
+| current CPU path (HNSW ef 128, oversampling 2.0), for comparison | 1.00 | 0.990 | 0.987 |
+
+| Kernel | per query |
+|---|---|
+| naive (per-row scale, per-chunk transpose, float intermediates) | 1,100 ms |
+| optimized (pre-transposed int8 chunks, per-page scale factored out, int32 max) | 73 ms single, 34 ms per query in batches of 4 |
+
+VRAM 9.6 GB for one pool. A CMP 170HX (HBM2e, ~1.5 TB/s vs the A4500's
+640 GB/s) should roughly halve the per-pass time. One pool suffices.
+
+**Rerank-depth finding (same run).** Feeding the exact prefetch into
+Qdrant's `original` rerank shows the final top-5 depends on the number of
+candidates reranked more than on how they were found: the service's
+50 + 50 candidates agree with a 100 + 100 reference on top-1 for 86 % of
+queries and on 0.85 of the top-5; 100 + 100 candidates agree 98 % / 0.98;
+200 + 200 disagree again (0.86) because the deeper set contains pages
+the reference never saw. So "agreement with a reference" is not a quality
+measure at this stage; the rerank on `original` reorders freely as the
+candidate set grows. Whether deeper rerank gives *better* answers needs
+relevance judgments (the eval harness with a gold set), not overlap.
+Until then `COLPALI_PREFETCH_MULTIPLIER` stays at 10; 20 costs 0.25 →
+0.5 s per query alone.
+
 **Sequence.**
 1. Measure on the A4500 in idle time: export `pooled_rows`/`pooled_cols`
    (done: `/srv/pdf-corpus/gpu-prefetch/`), int8 brute-force top-200 for
    the 50 benchmark queries vs the exact f32 ground truth, with and
    without f32 rescoring; end-to-end top-5 through Qdrant's rerank.
-   Decides one pool vs both. (`gpu_prefetch_bench.py`, results in
-   `gpu_bench_results.json`.)
+   Done: one pool suffices (`gpu_prefetch_bench_v2.py`,
+   `gpu_bench_results_v2.json`, `e2e_check.py`, `depth_check.py`).
 2. Build the index service and the pipeline hook; deploy on big-dumb GPU 1
    with the LLM split adjusted. 2-3 days.
 3. Rebuild trigger in bulk mode (step 5) and a staleness check in
