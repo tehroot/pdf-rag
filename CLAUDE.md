@@ -401,6 +401,9 @@ Read this before touching the R530. Details and the reasoning:
   (persistent; warm with a sequential read of the hot files with
   `l2arc_noprefetch=0`, then restore 1). ADATA 2L44291A9GEG: blank spare.
   ADATA 2L422L142JKP (nvme1n1): defective, do not use. WD Black: Windows.
+- **Accelerators.** The prefetch service contract, fleet benchmarks and
+  the Xeon Phi material are centralized in `docs/accelerators/`; read it
+  before touching the GPU index, the Phi, or `ColPaliPipeline`'s prefetch.
 - **Benchmark assets** in `/srv/pdf-corpus/ingest/recall/`: 50 embedded
   queries, exact top-100 ground truth per pooled vector, `recall_check.py
   <ef>`, `concurrency.py <clients> <secs> <ef> [vector]`, `rescore_check.py

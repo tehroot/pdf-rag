@@ -54,6 +54,7 @@ See [components/visual-dataflow.md](components/visual-dataflow.md).
 |------|----------------|
 | [status.md](status.md) | Rolling project status: what shipped this cycle, test counts, open items + decisions, deployment state. Start here for "where are we?" |
 | [architecture.md](architecture.md) | 1-page overview: module layout, the two backend pipelines, dispatcher, gotchas. |
+| [accelerators/](accelerators/README.md) | The prefetch service contract, cross-fleet MaxSim benchmarks, and the Xeon Phi architecture and bring-up. Everything about running the first-pass page search off the ingest host's CPUs. |
 | [components/](components/README.md) | Per-component deep dives — one walkthrough per core part of the application. Start here if you're working on the code. |
 | [deployment.md](deployment.md) | Building both transports, environment variables, running Qdrant + llama-server + this server locally, container/systemd patterns. |
 | [mcp-integration.md](mcp-integration.md) | Wiring this server into local LLM stacks that speak MCP: Claude Desktop, Cline / VS Code agents, Open WebUI, browser hosts. |
