@@ -1,0 +1,15 @@
+start: die 44 C, power 105 W
+fma        p=1 threads= 60 pf=1  1.710 s    539.0 GMAC/s  vpmadd231d per core-cycle 0.453
+fma        p=2 threads=120 pf=1  1.734 s   1062.9 GMAC/s  vpmadd231d per core-cycle 0.894
+fma        p=3 threads=180 pf=1  1.909 s   1086.2 GMAC/s  vpmadd231d per core-cycle 0.914
+fma        p=4 threads=240 pf=1  1.636 s   1126.5 GMAC/s  vpmadd231d per core-cycle 0.948
+kernl1     p=2 threads=120 pf=1  2.075 s    740.4 GMAC/s  vpmadd231d per core-cycle 0.623
+kernl1     p=4 threads=240 pf=1  2.074 s    740.5 GMAC/s  vpmadd231d per core-cycle 0.623
+stream     p=1 threads= 60 pf=1  0.106 s    189.5 GB/s read  (2013 MB total per pass)
+stream     p=2 threads=120 pf=1  0.206 s    195.5 GB/s read  (4027 MB total per pass)
+stream     p=4 threads=240 pf=1  0.410 s    196.5 GB/s read  (8053 MB total per pass)
+stream     p=4 threads=240 pf=0  0.473 s    170.3 GB/s read  (8053 MB total per pass)
+stream8    p=4 threads=240 pf=1  0.416 s    193.6 GB/s read  (8053 MB total per pass)
+kernstream p=4 threads=240 pf=1  0.587 s    549.1 GMAC/s  vpmadd231d per core-cycle 0.462  int8 read 27.5 GB/s
+kernstream p=4 threads=240 pf=0  0.565 s    570.4 GMAC/s  vpmadd231d per core-cycle 0.480  int8 read 28.5 GB/s
+end: die 47 C, power 115 W; highest die temperature during the runs: 52 C

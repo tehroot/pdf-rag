@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""phi-cores: load of every hardware thread on the Xeon Phi card, as a 4 x 61 grid.
+
+Reads /proc/stat on the card (ssh host "mic0", see ~/.ssh/config) and shows,
+per sample interval, how busy each of the 244 logical CPUs was.
+
+Card numbering (KNC): logical CPUs 4c+1 .. 4c+4 are the four threads of
+core c (c = 0..59); CPUs 0, 241, 242, 243 are core 60, where uOS runs.
+
+  phi-cores              one sample over 1 s
+  phi-cores -i 2 -w      refresh every 2 s until Ctrl+C
+  phi-cores -v           add a per-core table with each thread's percentage
+  phi-cores -a           ASCII shades instead of block characters
+"""
+import argparse
+import subprocess
+import sys
+import time
+
+CORES = 61
+SHADES_UTF = [" ", "░", "▒", "▓", "█"]
+SHADES_ASCII = [" ", ".", ":", "*", "#"]
+LIMITS = [5, 25, 50, 75]  # percent busy at which each next shade starts
+
+
+def position(cpu):
+    """Logical CPU -> (core, thread)."""
+    if cpu == 0:
+        return 60, 0
+    if cpu >= 241:
+        return 60, cpu - 240
+    return (cpu - 1) // 4, (cpu - 1) % 4
+
+
+def parse(block):
+    """Lines of /proc/stat -> {cpu: [counters]} for the per-CPU lines."""
+    out = {}
+    for line in block:
+        if line.startswith("cpu") and line[3:4].isdigit():
+            name, *vals = line.split()
+            out[int(name[3:])] = [int(v) for v in vals[:8]]
+    return out
+
+
+def usage(prev, cur):
+    """{cpu: (busy %, user %, system %)} between two samples."""
+    res = {}
+    for cpu, c in cur.items():
+        p = prev.get(cpu)
+        if p is None:
+            continue
+        d = [b - a for a, b in zip(p, c)]
+        total = sum(d)
+        if total <= 0:
+            res[cpu] = (0.0, 0.0, 0.0)
+            continue
+        idle = d[3] + d[4]
+        user = d[0] + d[1]
+        system = d[2] + d[5] + d[6]
+        res[cpu] = (100.0 * (total - idle) / total, 100.0 * user / total, 100.0 * system / total)
+    return res
+
+
+def shade(pct, shades):
+    level = sum(pct >= lim for lim in LIMITS)
+    return shades[level]
+
+
+def render(u, interval, shades, verbose):
+    grid = [[0.0] * CORES for _ in range(4)]
+    for cpu, (busy, _, _) in u.items():
+        core, thr = position(cpu)
+        grid[thr][core] = busy
+    n = max(len(u), 1)
+    busy_avg = sum(v[0] for v in u.values()) / n
+    user_avg = sum(v[1] for v in u.values()) / n
+    sys_avg = sum(v[2] for v in u.values()) / n
+    busy_threads = sum(v[0] >= 50 for v in u.values())
+    lines = [
+        f"mic0  {time.strftime('%H:%M:%S')}  interval {interval:g} s   "
+        f"busy {busy_avg:5.1f} %  (user {user_avg:.1f} %, system {sys_avg:.1f} %)   "
+        f"threads >= 50 %: {busy_threads}/{len(u)}",
+        "core   " + "".join(str(c // 10) if c % 10 == 0 else " " for c in range(CORES)),
+        "       " + "".join(str(c % 10) for c in range(CORES)),
+    ]
+    for t in range(4):
+        lines.append(f"thr {t}  " + "".join(shade(grid[t][c], shades) for c in range(CORES)))
+    legend = "  ".join(f"'{s}' {'<' + str(LIMITS[0]) if i == 0 else ('>=' + str(LIMITS[i - 1]))} %"
+                       for i, s in enumerate(shades))
+    lines.append(f"       core 60 = uOS.   shade: {legend}")
+    if verbose:
+        lines.append("")
+        rows = []
+        for c in range(CORES):
+            thr = [grid[t][c] for t in range(4)]
+            rows.append(f"c{c:02d} {sum(thr) / 4:5.1f}% [" + " ".join(f"{x:3.0f}" for x in thr) + "]")
+        per_line = 3
+        for i in range(0, CORES, per_line):
+            lines.append("   ".join(rows[i:i + per_line]))
+    return "\n".join(lines)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("-i", "--interval", type=float, default=1.0, help="sample interval in seconds (default 1)")
+    ap.add_argument("-w", "--watch", action="store_true", help="refresh until Ctrl+C")
+    ap.add_argument("-v", "--verbose", action="store_true", help="add the per-core table")
+    ap.add_argument("-a", "--ascii", action="store_true", help="ASCII shades")
+    ap.add_argument("--host", default="mic0", help="ssh host of the card (default mic0)")
+    args = ap.parse_args()
+    shades = SHADES_ASCII if args.ascii else SHADES_UTF
+
+    # One ssh session streams /proc/stat blocks; the card does the timing.
+    loop = "while :; do cat /proc/stat; echo ---; sleep %g; done" % args.interval
+    proc = subprocess.Popen(["ssh", "-o", "BatchMode=yes", args.host, loop],
+                            stdout=subprocess.PIPE, text=True)
+    prev, block = None, []
+    try:
+        for line in proc.stdout:
+            if line.strip() != "---":
+                block.append(line)
+                continue
+            cur, block = parse(block), []
+            if prev is not None:
+                out = render(usage(prev, cur), args.interval, shades, args.verbose)
+                if args.watch:
+                    sys.stdout.write("\033[H\033[J")
+                print(out, flush=True)
+                if not args.watch:
+                    break
+            prev = cur
+    except KeyboardInterrupt:
+        pass
+    finally:
+        proc.terminate()
+    if prev is None:
+        sys.exit("phi-cores: no data from %s (is the card online? try: ssh %s true)" % (args.host, args.host))
+
+
+if __name__ == "__main__":
+    main()
