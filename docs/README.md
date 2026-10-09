@@ -65,6 +65,7 @@ See [components/visual-dataflow.md](components/visual-dataflow.md).
 | [plans/sidecar-pool-v1.md](plans/sidecar-pool-v1.md) | ColPali sidecar pool: nginx least-connections balancer (`docker-compose.pool.yml`, `deploy/colpali-lb.conf`), replicas on a second GPU host, measured rates, what bit. Done 2026-09-17. |
 | [plans/sidecar-throughput-v1.md](plans/sidecar-throughput-v1.md) | Per-replica sidecar throughput: numpy + orjson post-processing (done), binary wire encodings `f32b64` / `f16b64` (done), Qdrant gRPC upsert outcome (done), thread-pool overlap and FlashAttention-2 (not started). |
 | [plans/gpu-text-embedder-v1.md](plans/gpu-text-embedder-v1.md) | llama-server on the GPU, sidecar VRAM headroom (`PYTORCH_CUDA_ALLOC_CONF`), per-document locks, visual-queue stop/resume semantics. Done 2026-09-17. |
+| [plans/embeddinggemma-2-candidate.md](plans/embeddinggemma-2-candidate.md) | EmbeddingGemma-2 against tomoro-colqwen3: model facts, why it does not replace the visual model, the text-side (bge-small) replacement candidate and its first experimental steps. Findings only, 2026-10-07. |
 
 ## Tool surface (what an agent sees)
 

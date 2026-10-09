@@ -52,10 +52,15 @@ static void pin(int cpu) {
     pthread_setaffinity_np(pthread_self(), sizeof s, &s);
 }
 
+//we define a vpmadd231d inline asm macro here at the top...for vpmadd231d
+//next there is an inline asm inside run_fma is a XOR operation for whatever is in zmm24, and then a second XOR operation
+// for whatever is in zmm25, both of these are marked as memory so they don't get messed with by GCC
 /* 24 independent multiply-add chains on zmm0..zmm23 */
 #define F(n) "vpmadd231d %%zmm24, %%zmm25, %%zmm" #n "\n\t"
 static void run_fma(long it) {
     __asm__ volatile("vpxord %%zmm24, %%zmm24, %%zmm24\n\tvpxord %%zmm25, %%zmm25, %%zmm25" ::: "memory");
+
+    //this sets up any number of vpmadd231d functions? passing in the register number?
     for (long i = 0; i < it; i++)
         __asm__ volatile(F(0) F(1) F(2) F(3) F(4) F(5) F(6) F(7) F(8) F(9) F(10) F(11)
                          F(12) F(13) F(14) F(15) F(16) F(17) F(18) F(19) F(20) F(21) F(22) F(23) ::: "memory");
