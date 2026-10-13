@@ -467,7 +467,7 @@ class QdrantClientTest {
     }
 
     @Test
-    void queryMultistage_sendsExpectedShape_andParsesHits() {
+    void queryMultistage_sendsExpectedShape_andParsesHits() throws Exception {
         server.stubFor(post(urlEqualTo("/collections/pages/points/query"))
                 .willReturn(aResponse().withStatus(200).withBody("""
                         {"result":{"points":[
@@ -503,6 +503,32 @@ class QdrantClientTest {
         assertThat(body).containsOnlyOnce("\"hnsw_ef\":256");
         assertThat(body).containsOnlyOnce("\"oversampling\":2.0");
         assertThat(body).contains("\"rescore\":true");
+        // the 6-arg overload sends no rerank params: the server default applies
+        assertThat(new com.fasterxml.jackson.databind.ObjectMapper().readTree(body).has("params")).isFalse();
+    }
+
+    @Test
+    void queryMultistage_pinsRerankRescore_atTopLevelOnly() throws Exception {
+        server.stubFor(post(urlEqualTo("/collections/pages/points/query"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"result\":{\"points\":[]}}")));
+        float[][] q = new float[][]{{0.1f, 0.2f}};
+        List<QdrantClient.PrefetchSpec> prefetches = List.of(
+                new QdrantClient.PrefetchSpec("pooled_rows", q, 50, 128, 2.0));
+
+        for (boolean rescore : new boolean[]{false, true}) {
+            server.resetRequests();
+            client.queryMultistage("pages", prefetches, "original", q, 5, null, rescore);
+
+            var body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(
+                    server.getAllServeEvents().get(0).getRequest().getBody());
+            var pin = body.path("params").path("quantization").path("rescore");
+            assertThat(pin.isBoolean()).isTrue();
+            assertThat(pin.booleanValue()).isEqualTo(rescore);
+            // the rerank pin leaves the prefetch stage's own rescore + oversampling alone
+            var stage = body.path("prefetch").get(0).path("params").path("quantization");
+            assertThat(stage.path("rescore").booleanValue()).isTrue();
+            assertThat(stage.path("oversampling").doubleValue()).isEqualTo(2.0);
+        }
     }
 
     @Test

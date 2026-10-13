@@ -313,11 +313,17 @@ Benefit beyond time: the collection lands on the mirrors defragmented.
 
 **The rerank step on spinning disks.** The service's visual search
 prefetches 10 × top_k candidates from each pooled vector, then reranks on
-`original`. Qdrant's default for a quantized vector rescores from the
-f32 copy on disk: about 100 candidates × 1.6 MB of random reads, 13 s
-cold on the mirrors, about 1 s from L2ARC. This step does not shrink with
-consolidation. It can be switched off per query (`rescore: false`), at a
-recall cost on MaxSim not yet measured.
+`original`. A rerank with rescoring reads the f32 copy on disk: about
+100 candidates × 1.6 MB of random reads, 13 s cold on the mirrors, about
+1 s from L2ARC. This step does not shrink with consolidation.
+
+Correction (2026-10-13): this paragraph first said that Qdrant's default
+rescores. The 1.13.4 source says otherwise: `default_rescoring()` is false
+for a binary multivector (`BinaryRamMulti`), and the service sent no
+params on the rerank, so production did not rescore. The default becomes
+true at Qdrant 1.16.1. The service now always sends the value,
+`ingest.colpali.rerank-rescore` (`COLPALI_RERANK_RESCORE`), default
+`false`, which keeps the 1.13.4 behavior across the upgrade.
 
 ### What the pass looked like in practice (2026-09-20/21, NVMe)
 
@@ -510,7 +516,7 @@ disk:
 | f32 pooled vectors, 78 GB | mapped, expected hot in page cache | on disk, unchanged; read only to rescore the prefetch's top 50 (~4 MB per query, L2ARC after first touch) |
 | int8 copy of the pooled vectors, 19 GB | none | new; anonymous RAM, never evicted; used for the HNSW walk |
 | binary copy of `original`, 56 GB | pinned in RAM | unchanged |
-| f32 `original`, 1.6 TB | on disk; rescores the final ~100 candidates (default on; measured: top-1 identical, top-5 overlap 0.988 without it); the only full-precision copy, from which every derived form can be recomputed without re-embedding | unchanged |
+| f32 `original`, 1.6 TB | on disk; read to rescore the final ~100 candidates only when the rerank asks for it (off by default in 1.13.4, see the correction in the rerank paragraph; measured: top-1 identical, top-5 overlap 0.988 without it); the only full-precision copy, from which every derived form can be recomputed without re-embedding | unchanged |
 
 Memory after: 62 + 19 GB anonymous plus the ARC, about 80 GB of headroom
 for the page cache and ingest. Stored precision stays FP32 everywhere;
@@ -571,9 +577,11 @@ with oversampling 2.0 (`COLPALI_PREFETCH_HNSW_EF`,
 - The copy back: Qdrant stopped, `zfs send` of 1.61 TB to a new dataset
   on `tank` (a sequential write, so the mirrors get a defragmented copy),
   swap, restart, EVO re-attached as L2ARC, warm-up read of the hot files.
-- The `original` rerank rescores from f32 on disk by default; measured
-  2026-09-22: top-1 identical, top-5 overlap 0.988 without it. Kept on;
-  a per-query switch if its reads ever matter.
+- The `original` rerank: measured 2026-09-22, top-1 identical and top-5
+  overlap 0.988 without rescoring against with it. This item first said
+  "by default" and "kept on". Correction (2026-10-13): in 1.13.4 the
+  default is off and the service sent no params, so production ran
+  without it. `ingest.colpali.rerank-rescore` now pins it (default false).
 
 ## 8. Operating rules
 

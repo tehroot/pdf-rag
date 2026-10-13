@@ -207,6 +207,30 @@ class ColPaliPipelineTest {
         assertThat(body).contains("\"limit\":5");
         // Prefetch limit = 10 × topK = 50.
         assertThat(body).contains("\"limit\":50");
+        // The rerank's rescoring is pinned, never left to the server default
+        // (which flips for binary multivectors at Qdrant 1.16.1).
+        var pin = new ObjectMapper().readTree(body).path("params").path("quantization").path("rescore");
+        assertThat(pin.isBoolean()).isTrue();
+        assertThat(pin.booleanValue()).isFalse();
+    }
+
+    @Test
+    void searchPages_rerankRescore_followsConfig() throws Exception {
+        setField(pipeline, "rerankRescore", true);
+        server.stubFor(post(urlEqualTo("/embed_query"))
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"vectors":[[0.7,0.3]]}""")));
+        server.stubFor(post(urlEqualTo("/collections/docs_pages/points/query"))
+                .willReturn(aResponse().withStatus(200).withBody("""
+                        {"result":{"points":[]}}""")));
+
+        pipeline.searchPages(new SearchRequest("qdrant", "docs", "q", 5, null));
+
+        var captured = server.getAllServeEvents().stream()
+                .filter(e -> e.getRequest().getUrl().startsWith("/collections/docs_pages/points/query"))
+                .findFirst().orElseThrow();
+        var body = new ObjectMapper().readTree(captured.getRequest().getBody());
+        assertThat(body.path("params").path("quantization").path("rescore").booleanValue()).isTrue();
     }
 
     @Test

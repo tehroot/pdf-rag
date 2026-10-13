@@ -460,6 +460,7 @@ Env vars (consumed via `@ConfigProperty`, see
 | `UPLOAD_MAX_BODY_SIZE` | Quarkus HTTP body cap (primary 413 defence; server-http) | `2G` |
 | `UPLOAD_TMP_DIR` | multipart temp dir — must share the store's dataset | `<root>/.tmp`; compose: `/documents/.tmp` |
 | `COLPALI_PREFETCH_MULTIPLIER` | multistage prefetch = N × top_k | `10` |
+| `COLPALI_RERANK_RESCORE` | rescoring on the `original` rerank, always sent; Qdrant's default flips to true at 1.16.1 | `false` |
 | `INGEST_SEARCH_DEBUG_CANDIDATES` | log candidate lists + scores at INFO | `false` |
 | `INGEST_SEARCH_DEDUP` | collapse overlapping chunks in results | `true` |
 | `COLPALI_SIDECAR_URL` | sidecar root | `http://localhost:8090` |

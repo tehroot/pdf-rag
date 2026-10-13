@@ -454,9 +454,9 @@ public class QdrantClient {
     }
 
     /**
-     * Run a multistage prefetch + rerank query against a multivector collection.
-     * Issues a single {@code POST /collections/{name}/points/query} with the
-     * Qdrant 1.10+ unified query API.
+     * Multistage query with no search params on the rerank stage, i.e. the
+     * server's default rescoring. See the overload for why callers that
+     * rerank on a quantized vector should pin it.
      */
     public List<SearchHitRaw> queryMultistage(String collection,
                                               List<PrefetchSpec> prefetches,
@@ -464,6 +464,27 @@ public class QdrantClient {
                                               float[][] rerankQuery,
                                               int limit,
                                               Map<String, Object> filter) {
+        return queryMultistage(collection, prefetches, rerankUsing, rerankQuery, limit, filter, null);
+    }
+
+    /**
+     * Run a multistage prefetch + rerank query against a multivector collection.
+     * Issues a single {@code POST /collections/{name}/points/query} with the
+     * Qdrant 1.10+ unified query API.
+     *
+     * @param rerankRescore {@code params.quantization.rescore} for the rerank
+     *        stage; {@code null} sends no params. Qdrant's default for a
+     *        binary-quantized multivector is false up to 1.15 and true from
+     *        1.16.1, so an unpinned rerank on {@code original} starts reading
+     *        f32 vectors from disk after an upgrade with no change here.
+     */
+    public List<SearchHitRaw> queryMultistage(String collection,
+                                              List<PrefetchSpec> prefetches,
+                                              String rerankUsing,
+                                              float[][] rerankQuery,
+                                              int limit,
+                                              Map<String, Object> filter,
+                                              Boolean rerankRescore) {
         if (rerankUsing == null || rerankUsing.isBlank()) {
             throw new IngestException("rerankUsing is required for multistage query");
         }
@@ -506,6 +527,11 @@ public class QdrantClient {
         body.put("query", rerankQuery);
         body.put("using", rerankUsing);
         body.put("limit", limit);
+        if (rerankRescore != null) {
+            // Top-level params apply to the rerank stage only; each prefetch
+            // stage carries its own (above).
+            body.put("params", Map.of("quantization", Map.of("rescore", rerankRescore)));
+        }
         body.put("with_payload", true);
         if (filter != null && !filter.isEmpty()) {
             body.put("filter", toQdrantFilter(filter));
