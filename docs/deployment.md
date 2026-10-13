@@ -30,7 +30,7 @@ same tools and read the same env vars.
 |------|-----|------|
 | JDK 21+ | Compiles to Java 21 bytecode. | Newer JDKs work; we target `--release 21`. |
 | Maven 3.9.x | Quarkus 3.33 wants ≥ 3.9.6. | The repo uses `mvnvm` (auto-pins 3.9.9). Any installed `mvn` ≥ 3.9.6 works too. |
-| **Qdrant** (Qdrant backend) | Vector store. | Local Docker is fine; **pin to `qdrant/qdrant:v1.13.x`** for the multivector + multistage query API we use. Both ports are needed: REST 6333 for everything, gRPC 6334 for the `<kb>_pages` upserts (`ingest.qdrant.upsert-transport=grpc`, the default; a gRPC failure logs a warning and falls back to REST for that batch). |
+| **Qdrant** (Qdrant backend) | Vector store. | Local Docker is fine; **pin to `qdrant/qdrant:v1.13.x`** for the multivector + multistage query API we use. The compose file reads the tag from `QDRANT_VERSION` (default `v1.13.4`); the upgrade to 1.19.2 is in `plans/qdrant-upgrade-1.19-v1.md`. Both ports are needed: REST 6333 for everything, gRPC 6334 for the `<kb>_pages` upserts (`ingest.qdrant.upsert-transport=grpc`, the default; a gRPC failure logs a warning and falls back to REST for that batch). |
 | **Embeddings endpoint** (Qdrant backend) | OpenAI-compatible `/v1/embeddings`. | llama.cpp's `llama-server` (started with `--embeddings`) is the project default. vLLM / OpenAI / Together / LM Studio also work over the same OpenAI shape. |
 | **ColPali sidecar** (Qdrant backend, optional but default-on) | Visual-side embeddings. | Python service in `sidecar/`. CPU image with ColSmolVLM or GPU image with ColQwen2. See `sidecar/README.md` and `components/colpali-sidecar.md`. |
 | **Open WebUI** (legacy backend, optional) | If you still want the Open WebUI target. | 0.9.x; URL in `OPEN_WEBUI_BASE_URL`. |
