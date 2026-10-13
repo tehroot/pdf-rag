@@ -1,6 +1,6 @@
 # Plan: upgrade Qdrant from 1.13.4 to 1.19.2 on vector-store (v1)
 
-Status: draft for review. No step has started.
+Status: draft for review, revised 2026-10-12. No step has started.
 Author drafted: 2026-10-09
 
 ## Context
@@ -8,9 +8,25 @@ Author drafted: 2026-10-09
 Qdrant moves with `tank` from the R530 to the Cisco C240 M5
 `vector-store` (192.168.1.166): 2 × Xeon Gold 6252 (Cascade Lake,
 AVX-512 VNNI, no VPOPCNTDQ), 12 × 16 GB DDR4-2133 (one DIMM per channel),
-Debian 13.7. On 2026-10-09 the stack was not running there, and a scrub of
-`tank` was in progress. The compose file pins `qdrant/qdrant:v1.13.4`;
+Debian 13.7. The compose file pins `qdrant/qdrant:v1.13.4`;
 `/tank/qdrant` holds 1.62 TB.
+
+State on 2026-10-12, before the host was shut down: `tank` ONLINE with no
+errors; the scrubs of 2026-10-09 and 2026-10-11 repaired 0 B; SMART OK on
+all four disks (`7JJG2H7G` has 1 reallocated sector); no containers; all
+21 collections present under `/tank/qdrant`, newest file 2026-09-28.
+
+**Order (user decision, 2026-10-12): this upgrade comes before any NVMe
+change.** All steps run on the HDD mirrors of `tank`, with no L2ARC. The
+B650 switch card (about 4 TB of NVMe) moves from the R530 to vector-store
+after step 6 passes. One variable at a time: the baseline and every step
+are measured on the same storage.
+
+**VNNI.** The upgrade alone does not put the current collections on a VNNI
+path. In v1.19.2 the AVX-512 VNNI code is used only by TurboQuant. The
+current int8 and binary quantization use the AVX2 + FMA path on this CPU
+(the binary AVX-512 path needs VPOPCNTDQ, which Cascade Lake does not
+have). The VNNI gain needs the TurboQuant test in "After the upgrade".
 
 Data to keep intact:
 
@@ -83,15 +99,32 @@ Java client: `io.qdrant:client` 1.13.0, used only for the gRPC upsert.
 
 ## Preconditions
 
-1. The scrub of `tank` finished with 0 bytes repaired and no errors.
-2. The L2ARC decision is made (the 970 EVO is not in vector-store). Without
-   it, latency numbers are not comparable with the R530 numbers.
+1. Done: the scrubs of `tank` on 2026-10-09 and 2026-10-11 repaired 0 B
+   with no errors.
+2. Done (decision): no L2ARC and no NVMe during the upgrade (see "Order"
+   in Context). The latency numbers are not comparable with the R530
+   numbers; they are comparable with the step 0 baseline on this host.
 3. No writes: `pdf-rag-http` and the bulk runner are stopped for the whole
    upgrade. Only the `qdrant` service runs.
-4. C1 and C2 are merged and `/srv/pdf-rag` is pulled.
-5. Free space on `tank` is checked (15.3 TB free on 2026-10-09). A snapshot
+4. C1 and C2 are merged and `/srv/pdf-rag` is pulled. Both are on the
+   branch `qdrant/migration-1.19` (2026-10-13), not merged yet. C1 sends
+   `rescore: false` on the rerank, which is the 1.13.4 behavior, so the
+   deploy changes no result before step 1.
+5. Free space on `tank` is checked (15.3 TB free on 2026-10-12). A snapshot
    holds the old blocks of every file that a migration rewrites, up to
    the 1.62 TB of the dataset per step in the worst case.
+6. `.env` on vector-store still has
+   `COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml:docker-compose.pool.yml`
+   from the R530, and vector-store has no NVIDIA card. Set
+   `COMPOSE_FILE=docker-compose.yml` for the whole upgrade. The full-stack
+   layout for this host is a separate decision (After the upgrade, item 1).
+7. The recall scripts in `/srv/pdf-corpus/ingest/recall` start on
+   vector-store (Python and its imports). Not checked since the move.
+   Check with `python3 recall_check.py --help` or one dry run before step 0.
+   Also read what `concurrency.py` and `rescore_check.py` send on the
+   `original` rerank. If they send no `rescore`, they rescore from 1.16.1
+   and their numbers change for a reason that is not the upgrade. Pin
+   them to the service value (C1) before step 0.
 
 ## Step 0: baseline on 1.13.4
 
@@ -182,10 +215,11 @@ grows with every rewrite; decide whether to keep it before step 3.
 
 ## Open questions
 
-- Where does the 970 EVO go: L2ARC on vector-store (needs a slot and an
-  NVMe adapter; vector-store has only Riser 1), or nowhere?
+- Answered 2026-10-12: the NVMe change (the B650 card, with the 970 EVO
+  or other drives) comes after step 6, not during the upgrade.
 - How long is the step 3 migration for 934,834 multivector points and
-  2,012,201 text points?
+  2,012,201 text points? It runs on the HDD mirrors, so expect it to be
+  slower than on NVMe.
 - Does step 6 rewrite existing immutable segments to single-file mmap, and
   how much does the snapshot grow if it does?
 - Keep or destroy `tank/qdrant@int8-layout-2026-09-24` before step 3?
