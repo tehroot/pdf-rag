@@ -284,6 +284,10 @@ the same data, so the two transports mix freely.
 
 ### `queryMultistage(coll, prefetches, rerankUsing, rerankQuery, limit, filter)`
 
+> **Out of date (2026-10-15):** this section omits `hnsw_ef`, oversampling and the
+> rerank `params` (C1). The current request and its costs are in
+> [query-path.md](query-path.md).
+
 The unified Qdrant 1.10+ query API:
 
 ```

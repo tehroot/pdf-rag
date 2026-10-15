@@ -149,6 +149,10 @@ from Qdrant's blog):
 
 ### `searchPages(req)` — multistage query
 
+> **Out of date (2026-10-15):** this section omits `hnsw_ef`, oversampling and the
+> rerank `params` (C1). The current request and its costs are in
+> [query-path.md](query-path.md).
+
 ```java
 float[][] queryVectors = sidecar.embedQuery(req.query());
 int topK = req.topK();
