@@ -62,6 +62,14 @@ public class ColPaliPipeline {
     @ConfigProperty(name = "ingest.colpali.prefetch-oversampling", defaultValue = "2.0")
     double prefetchOversampling;
 
+    /** Rescoring on the {@code original} rerank stage, always sent explicitly.
+     *  Qdrant's default for a binary multivector is false in 1.13.4 and true
+     *  from 1.16.1; true reads ~100 candidates x 1.6 MB of f32 from disk per
+     *  query (13 s cold on the HDD mirrors, segments doc). false keeps the
+     *  1.13.4 behavior. */
+    @ConfigProperty(name = "ingest.colpali.rerank-rescore", defaultValue = "false")
+    boolean rerankRescore;
+
     /**
      * Pages per multivector upsert request. Deliberately separate from (and far
      * smaller than) the text side's {@code upsert-batch-size}: a ColQwen2-class
@@ -258,7 +266,7 @@ public class ColPaliPipeline {
 
         String pagesCollection = pagesCollectionName(req.kbName());
         List<QdrantClient.SearchHitRaw> raw = qdrant.queryMultistage(
-                pagesCollection, prefetches, "original", queryVectors, topK, req.filter());
+                pagesCollection, prefetches, "original", queryVectors, topK, req.filter(), rerankRescore);
         LOG.debugf("search visual kb=%s topK=%d prefetchLimit=%d embed=%dms multistage=%dms hits=%d",
                 req.kbName(), topK, prefetchLimit, ms(t0, tEmbed),
                 ms(tEmbed, System.nanoTime()), raw.size());
