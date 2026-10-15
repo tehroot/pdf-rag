@@ -105,6 +105,13 @@ Costs and risks:
 
 1. Confirm llama.cpp support for EmbeddingGemma-2 and a bf16 or f32 GGUF.
    If no support, decide on a different server before more work.
+   Partial answer (2026-10-11): `ggml-org/embeddinggemma-2-GGUF` (the
+   llama.cpp organization, automatic conversion) publishes BF16 and Q8_0
+   text GGUFs (558 / 310 MB) and BF16 / Q8_0 `mmproj` files (982 / 555 MB).
+   Revision `bfcd298` is on vector-store in
+   `/srv/pdf-rag/models/embeddinggemma-2-GGUF/`, SHA-256 verified. Still
+   open: the minimum llama-server version, and BF16 output that matches the
+   sentence-transformers reference on the same inputs.
 2. Add query/document prefix support to `Embedder` behind configuration.
    Default stays off, so bge behavior does not change.
 3. Build a gold query set for a DTIC sample (the eval harness needs it in
