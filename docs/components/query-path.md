@@ -3,11 +3,9 @@
 How one `search_documents` call becomes Qdrant work, what each stage
 costs, which speedups are in production, and which are proposed.
 
-State: 2026-10-15, Qdrant 1.13.4, branch `qdrant/migration-1.19` (C1
-included). The measurements are from the R530. The C240 (`vector-store`)
-has no measurements yet; step 0 of
-[../plans/qdrant-upgrade-1.19-v1.md](../plans/qdrant-upgrade-1.19-v1.md)
-takes them.
+State: 2026-10-15, Qdrant 1.13.4, C1 merged. Most measurements are from
+the R530. Section 4.5 also has the C240 (`vector-store`) step 0 baseline
+of [../plans/qdrant-upgrade-1.19-v1.md](../plans/qdrant-upgrade-1.19-v1.md).
 
 ## 1. The path
 
@@ -151,7 +149,7 @@ Default fusion query, 20 query rows:
 | Stage | Pages scored | Data touched | Where from |
 |---|---|---|---|
 | prefetch walks (both) | more than 2 × 18 × 200 (the walk also scores the neighbours of each expanded node) | 10 KB per page (int8) | RAM |
-| prefetch rescore (both) | 2 × 18 × 200 = 7,200 | 41 KB per page, about 295 MB (derived, see section 8) | page cache, else disk |
+| prefetch rescore (both) | 2 × 18 × 200 = 7,200 | 41 KB per page, about 295 MB derived; measured about 340 MB per prefetch, cold | page cache, else disk |
 | rerank, `rescore: false` | 100–200 | 51 KB per page, up to 10 MB | RAM |
 | rerank, `rescore: true` | + up to 180 | 1.6 MB per page, up to 290 MB | page cache, else disk |
 
@@ -165,9 +163,23 @@ Measured on the R530 (mirrors + L2ARC, `ef` 128, oversampling 2.0):
 | rerank with rescore, cold | 13 s (mirrors), about 1 s (L2ARC) | — |
 
 The limit at 8 clients is CPU: after #5 (section 6), the I/O pressure
-was 1–4 %. The segments doc labels the service-shaped row
-"with rescore". That label is correct only if `concurrency.py` sent
-`rescore: true` (section 8).
+was 1–4 %. The segments doc labels the service-shaped row "with
+rescore". `concurrency.py` sends one pooled vector only, so the script
+for that row is not known, and its rescore setting is not known.
+
+Measured on the C240 (step 0, 2026-10-15, Qdrant 1.13.4, mirrors, no
+L2ARC, `ef` 128):
+
+| Query | Result | Tank read |
+|---|---|---|
+| one prefetch, oversampling 1.0, warm | p50 0.09 s; 8 clients 50.4 q/s, p50 0.156 s | 0 |
+| one prefetch, oversampling 2.0, cold | p50 5.3 s; recall@50 0.990, top-1 1.00 | about 340 MB per query |
+| one prefetch, oversampling 2.0, warm (same 50 queries) | 8 clients 32.4 q/s, p50 0.245 s | 0 |
+| prefetch 50 + 50 + rerank, `rescore: false` | p50 0.32 s | 0 |
+| prefetch 50 + 50 + rerank, `rescore: true`, cold | p50 2.34 s | about 410 MB per query |
+
+The warm rows repeat the same 50 queries. New queries read cold pages
+until the page cache holds the 78 GB of f32 pooled files.
 
 ## 5. Settings
 
@@ -188,10 +200,10 @@ was 1–4 %. The segments doc labels the service-shaped row
 | 1 | ZFS ARC cap 64 → 24 GiB, so the page cache has room | 2026-09-20 | text search 18–25 s → about 1 s |
 | 2 | Segment merge 1,150 → 18 (`default_segment_number` 18, `max_segment_size` 100 GB) | 2026-09-21 | pooled query about 20× faster; recall@100 0.999 → 0.97–0.98 at `ef` 100 |
 | 3 | `hnsw_ef` set on the prefetch stages | 2026-09-21 | recovers the recall from #2 at no latency cost |
-| 4 | Binary `original` in RAM, f32 on disk, rerank without rescore | collection design (rescore off by the 1.13.4 default) | rerank 0.02 s; top-1 identical, top-5 overlap 0.988 against rescore |
+| 4 | Binary `original` in RAM, f32 on disk, rerank without rescore | collection design (rescore off by the 1.13.4 default) | rerank 0.02 s. Quality cost against exact MaxSim (C240, 2026-10-15): top-1 agrees 0.54, top-5 overlap 0.696. The earlier 0.988 compared no rescore with no rescore |
 | 5 | int8 pooled copies `always_ram` + oversampling 2.0 | 2026-09-23 | 8 clients: 0.33 q/s, p50 18 s → 9.6 q/s, p50 0.74 s; top-1 1.00 |
 | 6 | L2ARC on the 970 EVO | 2026-09-22 | cold f32 reads served from NVMe; **not present on the C240** |
-| 7 | C1: rerank rescore pinned to `false` | 2026-10-13, not merged | keeps #4 after 1.16.1, where the default becomes `true` |
+| 7 | C1: rerank rescore pinned to `false` | 2026-10-13, merged 2026-10-15 | keeps #4 after 1.16.1, where the default becomes `true` |
 
 \#5 is the reason the prefetch walk does not depend on the page cache.
 Before #5, the walk read the f32 pooled files and stalled on 4 KB page
@@ -209,7 +221,7 @@ engines below exist because the RAM need grows with the corpus.
 |---|---|---|---|
 | Upgrade to 1.19.2 | in progress: C1, C2 on the branch; steps 0–6 not started | faster AVX2 code, io_uring reads, batched HNSW search; no number yet | 5 migrations on HDD; ZFS snapshot before each |
 | TurboQuant on 1.19.2 | after the upgrade | the only AVX-512 VNNI path in Qdrant; the current int8 and binary scoring stay on AVX2 | config `PATCH` rebuilds all 18 segments; test on a copy collection first |
-| NVMe (B650 card, about 4 TB) | after step 6 | cold f32 reads from NVMe; makes `rerank-rescore: true` affordable (13 s → about 1 s) | the defective ADATA must not be used |
+| NVMe (B650 card, about 4 TB) | after step 6 (decided 2026-10-15) | cold f32 reads from NVMe: the pooled rescore (about 340 MB per query cold) and `rerank-rescore: true` (2.34 s, about 410 MB per query on the mirrors) | the defective ADATA must not be used |
 | 8 segments instead of 18 | deferred (2026-09-21) | about 2× throughput at the same recall | every future merge builds 300 GB segments |
 
 ### 7.2 Outside Qdrant: a prefetch service
@@ -244,24 +256,29 @@ The service is not built. Candidate engines:
 
 ## 8. Open items and conflicts
 
-1. **The f32 pooled rescore volume.** The 1.13.4 source gives 18 × 200
-   pages per prefetch, about 295 MB per query. The segments doc (§7.7)
-   says about 4 MB. If the source reading is correct, the 78 GB of f32
-   pooled files must stay in the page cache. The C240 has no L2ARC, so
-   a cold page goes to the mirrors. Measure the disk bytes per query at
-   step 0.
-2. **The contract and C1 disagree.** The prefetch contract reranks with
+1. **The f32 pooled rescore volume.** Confirmed at step 0: about 340 MB
+   per prefetch, cold (the source gives about 147 MB; ZFS record reads
+   add the rest). The segments doc value of about 4 MB was wrong. On the
+   C240 a cold query takes about 5 s until the page cache holds the
+   78 GB of f32 pooled files. Decision (2026-10-15): accept this during
+   the upgrade; the NVMe change after step 6 is the fix.
+2. **The rerank rescore quality.** Without rescore, the rerank differs
+   from exact MaxSim on the top-1 for 46 % of queries (section 4.5).
+   `false` stays the default for the upgrade. Decide the default after
+   the NVMe change, from latency on NVMe and, if possible, the eval
+   harness.
+3. **The contract and C1 disagree.** The prefetch contract reranks with
    rescoring on. On the HDD mirrors that is up to 200 × 1.6 MB per query.
    Decide when the service is built, after the NVMe change.
-3. **The benchmark scripts.** `concurrency.py` and `rescore_check.py`
-   send their own requests. If they send no rerank `rescore`, their
-   numbers change at 1.16.1 for a reason that is not the upgrade. Read
-   them before step 0 (plan precondition 7).
-4. **Stale documents.** `benchmarks.md` still predicts 40–80 ms for the
+4. **The benchmark scripts.** Fixed 2026-10-15 on the host (backups
+   `*.orig-2026-10-15`): `rescore_check.py` sends `rescore` on both
+   sides; `recall_check.py` and `concurrency.py` take an optional
+   oversampling argument; `recall_check.py` reports top-1 and recall@50.
+5. **Stale documents.** `benchmarks.md` still predicts 40–80 ms for the
    Phi (the 191 GMAC correction is not in it). `colpali-pipeline.md` and
    `qdrant-client.md` show the request without `hnsw_ef`, oversampling
    and the rerank `params`.
-5. **Version drift.** The per-segment rules in 4.4 are from 1.13.4.
+6. **Version drift.** The per-segment rules in 4.4 are from 1.13.4.
    Check `segments_searcher.rs` and `hnsw.rs` again at 1.19.2.
 
 ## 9. Sources

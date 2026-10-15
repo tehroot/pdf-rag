@@ -65,7 +65,7 @@ the one to expect to be long.
 
 | Version | Change | Effect on us | Action |
 |---|---|---|---|
-| 1.16.1 | `default_rescoring()` for binary multivectors (`BinaryRamMulti`) changes from false to true (verified in the source at v1.13.4 and v1.19.2) | Our rerank on `original` sends no `params`. From step 3 it rescores about 100 candidates × 1.6 MB from f32 on the mirrors: 13 s cold, about 1 s from L2ARC (measured on the R530) | **C1, before any search on step 3 or later** |
+| 1.16.1 | `default_rescoring()` for binary multivectors (`BinaryRamMulti`) changes from false to true (verified in the source at v1.13.4 and v1.19.2) | Our rerank on `original` sent no `params`. From step 3 it would rescore about 100 candidates × 1.6 MB from f32 on the mirrors: 13 s cold, about 1 s from L2ARC (R530); p50 2.34 s, about 410 MB per query (C240, step 0) | **C1, before any search on step 3 or later** |
 | 1.15.5 | `vectors_count` removed from collection info (#7244) | `QdrantClient` DTO field reads 0. `ChunkPipeline` already uses `points_count` | none; delete the field in C3 |
 | 1.17.0 | gRPC vector output format changed (#7183) | `QdrantGrpcUpserter` only writes; it uses the deprecated `data` + `vectors_count` fields, which the v1.19.2 proto still accepts | test an upsert after step 6; move to `multi_dense` in C3 |
 | 1.18.0 | default 60 s timeout on update requests (#8944) | large `wait=true` upserts during a busy optimizer can fail | watch the next bulk load |
@@ -106,8 +106,9 @@ Java client: `io.qdrant:client` 1.13.0, used only for the gRPC upsert.
    numbers; they are comparable with the step 0 baseline on this host.
 3. No writes: `pdf-rag-http` and the bulk runner are stopped for the whole
    upgrade. Only the `qdrant` service runs.
-4. C1 and C2 are merged and `/srv/pdf-rag` is pulled. Both are on the
-   branch `qdrant/migration-1.19` (2026-10-13), not merged yet. C1 sends
+4. Done 2026-10-15: C1 and C2 are merged (PR #2, `ed6b314`) and
+   `/srv/pdf-rag` is at that commit (moved with a git bundle: the host key
+   has no GitHub access). C1 sends
    `rescore: false` on the rerank, which is the 1.13.4 behavior, so the
    deploy changes no result before step 1.
 5. Free space on `tank` is checked (15.3 TB free on 2026-10-12). A snapshot
@@ -125,6 +126,10 @@ Java client: `io.qdrant:client` 1.13.0, used only for the gRPC upsert.
    `original` rerank. If they send no `rescore`, they rescore from 1.16.1
    and their numbers change for a reason that is not the upgrade. Pin
    them to the service value (C1) before step 0.
+   Done 2026-10-15: the "rescore" side of `rescore_check.py` sent no
+   params, so it never rescored on 1.13.4. Both sides now send it
+   explicitly; `recall_check.py` and `concurrency.py` take an optional
+   oversampling argument (backups `*.orig-2026-10-15`).
 
 ## Step 0: baseline on 1.13.4
 
@@ -193,7 +198,7 @@ grows with every rewrite; decide whether to keep it before step 3.
 
 | Step | Tag | Start | Ready | Migration time | Snapshot growth | Counts OK | Recall OK | Notes |
 |---|---|---|---|---|---|---|---|---|
-| 0 | v1.13.4 | | | — | — | | | baseline |
+| 0 | v1.13.4 | 2026-10-15 03:22 | 663 s | — | — | 934,834 / 2,012,201 | recall@100 0.9608 / 0.9654; os 2.0: recall@50 0.990 / 0.991, top-1 1.00 | 8 clients: 50.4 q/s (os 1.0), 32.4 q/s (os 2.0, warm). Rerank rescore vs not: top-1 0.54, p50 2.34 / 0.32 s. Logs `step0-v1.13.4.log`, `step0b-v1.13.4.log` |
 | 1 | v1.14.1 | | | | | | | |
 | 2 | v1.15.5 | | | | | | | |
 | 3 | v1.16.3 | | | | | | | |

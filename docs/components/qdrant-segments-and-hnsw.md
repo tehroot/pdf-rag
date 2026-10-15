@@ -513,10 +513,10 @@ disk:
 
 | Data | Before | After |
 |---|---|---|
-| f32 pooled vectors, 78 GB | mapped, expected hot in page cache | on disk, unchanged; read only to rescore the prefetch's top 50 (~4 MB per query, L2ARC after first touch) |
+| f32 pooled vectors, 78 GB | mapped, expected hot in page cache | on disk, unchanged; read to rescore the prefetch candidates. This cell first said "top 50, ~4 MB per query". Correction (2026-10-15): the rescore runs per segment, 18 × 2 × `limit` pages; measured on the C240 cold, about 340 MB per query at `limit` 100 |
 | int8 copy of the pooled vectors, 19 GB | none | new; anonymous RAM, never evicted; used for the HNSW walk |
 | binary copy of `original`, 56 GB | pinned in RAM | unchanged |
-| f32 `original`, 1.6 TB | on disk; read to rescore the final ~100 candidates only when the rerank asks for it (off by default in 1.13.4, see the correction in the rerank paragraph; measured: top-1 identical, top-5 overlap 0.988 without it); the only full-precision copy, from which every derived form can be recomputed without re-embedding | unchanged |
+| f32 `original`, 1.6 TB | on disk; read to rescore the final ~100 candidates only when the rerank asks for it (off by default in 1.13.4, see the correction in the rerank paragraph). Correction (2026-10-15): the "top-1 identical, top-5 overlap 0.988" measurement compared no rescore with no rescore; the real comparison is in §7.9; the only full-precision copy, from which every derived form can be recomputed without re-embedding | unchanged |
 
 Memory after: 62 + 19 GB anonymous plus the ARC, about 80 GB of headroom
 for the page cache and ingest. Stored precision stays FP32 everywhere;
@@ -577,11 +577,21 @@ with oversampling 2.0 (`COLPALI_PREFETCH_HNSW_EF`,
 - The copy back: Qdrant stopped, `zfs send` of 1.61 TB to a new dataset
   on `tank` (a sequential write, so the mirrors get a defragmented copy),
   swap, restart, EVO re-attached as L2ARC, warm-up read of the hot files.
-- The `original` rerank: measured 2026-09-22, top-1 identical and top-5
-  overlap 0.988 without rescoring against with it. This item first said
-  "by default" and "kept on". Correction (2026-10-13): in 1.13.4 the
-  default is off and the service sent no params, so production ran
-  without it. `ingest.colpali.rerank-rescore` now pins it (default false).
+- The `original` rerank. This item first said "by default", "kept on",
+  and "top-1 identical, top-5 overlap 0.988 without rescoring". Two
+  corrections:
+  - 2026-10-13: in 1.13.4 the default is off and the service sent no
+    params, so production ran without rescore.
+    `ingest.colpali.rerank-rescore` now pins it (default false).
+  - 2026-10-15: the "rescore" side of `rescore_check.py agree` sent no
+    params either, so the 0.988 compared no rescore with no rescore (it
+    read 0 MB from disk). With `rescore: true` sent explicitly, on the
+    C240 (1.13.4, prefetch 50 + 50 at `ef` 256, limit 10, 50 queries):
+    top-1 agrees 0.54, top-5 overlap 0.696, top-10 0.778; p50 2.34 s
+    with rescore against 0.32 s without; about 410 MB read from the
+    mirrors per query. The binary-only rerank therefore differs from
+    exact MaxSim on the top-1 for 46 % of queries. This is agreement
+    with exact MaxSim, not judged relevance.
 
 ## 8. Operating rules
 
